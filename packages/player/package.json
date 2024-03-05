@@ -24,7 +24,10 @@
     "internal:cypress:open": "pnpm cypress open",
     "internal:cypress:run": "pnpm cypress run --spec cypress/e2e/play-log/spec.cy.js",
     "cypress:open": "bash ./scripts/cypress-open.sh",
-    "cypress:run": "bash ./scripts/cypress-run.sh"
+    "cypress:run": "bash ./scripts/cypress-run.sh",
+    "cypress:cache:path": "cypress cache path",
+    "cypress:cache:list": "cypress cache list",
+    "cypress:verify": "cypress verify"
   },
   "files": [
     "dist"
