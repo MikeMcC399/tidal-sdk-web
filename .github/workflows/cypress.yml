@@ -14,6 +14,7 @@ on:
     paths:
       - packages/true-time/**
       - packages/player/**
+  workflow_dispatch:
 
 concurrency:
   group: cypress-${{ github.event.pull_request.number || github.ref }}
