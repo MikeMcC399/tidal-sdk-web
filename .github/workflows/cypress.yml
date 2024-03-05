@@ -16,6 +16,9 @@ on:
       - packages/player/**
   workflow_dispatch:
 
+env:
+    DEBUG: '@cypress/github-action'
+
 concurrency:
   group: cypress-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
