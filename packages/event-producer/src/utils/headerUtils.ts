@@ -1,7 +1,7 @@
 import type { Credentials } from '@tidal-music/common';
 
-import type { ConsentCategory } from '../blockedConsentCategories';
-import type { AppInfo, EventHeaders, PlatformData } from '../types';
+import type { ConsentCategory } from '../blockedConsentCategories.js';
+import type { AppInfo, EventHeaders, PlatformData } from '../types.js';
 
 export const getEventHeaders = ({
   appInfo: { appName, appVersion },
@@ -17,8 +17,8 @@ export const getEventHeaders = ({
   consentCategory: ConsentCategory;
   credentials?: Credentials;
   platformData: PlatformData;
-  sentTimestamp: string;
-  suppliedHeaders?: Record<string, string>;
+  sentTimestamp: number;
+  suppliedHeaders?: Record<string, number | string>;
 }) => {
   const accessToken = credentials?.token;
   const clientId = credentials?.clientId ?? 'clientIDMissing!';

@@ -1,33 +1,53 @@
+import { fixupPluginRules } from '@eslint/compat';
 import tidal from 'eslint-config-tidal';
 import disableAutofix from 'eslint-plugin-disable-autofix';
 import jsdoc from 'eslint-plugin-jsdoc';
 
-/** @type { import("eslint").Linter.FlatConfig[] } */
-// eslint-disable-next-line import/no-default-export
+/** @type { import("eslint").Linter.Config[] } */
 export default [
   ...tidal,
   {
     files: [
+      '*.js',
       'packages/*/src/**/*.ts',
       'packages/*/test/*/*.ts',
       'packages/*/*.ts',
+      'packages/*/*.js',
+      'packages/*/demo/*.js',
+      'packages/*/examples/*.js',
     ],
+    languageOptions: {
+      parserOptions: {
+        projectService: {
+          allowDefaultProject: [
+            '*.js',
+            'demo/*.js',
+            'examples/*.js',
+            'packages/*/demo/*.js',
+            'packages/*/examples/*.js',
+          ],
+          defaultProject: 'tsconfig.json',
+        },
+      },
+    },
   },
   {
     ignores: [
       'node_modules/*',
       'packages/*/node_modules/*',
       'packages/*/dist/*',
+      'packages/**/*.generated.ts',
       'coverage',
+      'packages/*/coverage',
     ],
   },
   {
     plugins: {
-      'disable-autofix': disableAutofix,
+      'disable-autofix': fixupPluginRules(disableAutofix),
       jsdoc,
     },
     rules: {
-      '@typescript-eslint/ban-types': [
+      '@typescript-eslint/no-restricted-types': [
         'warn',
         {
           types: {
@@ -48,7 +68,7 @@ export default [
       'no-restricted-syntax': [
         'error',
         {
-          message: 'Never use Date.now! always use TrueTime',
+          message: 'Never use Date.now! always use trueTime.now()',
           selector:
             'CallExpression[callee.object.name="Date"][callee.property.name="now"]',
         },

@@ -1,17 +1,37 @@
 /* c8 ignore start types file */
 import type { Credentials } from '@tidal-music/common';
 
+export type StorageAdapter = {
+  load(key: string): Promise<string | null>;
+  remove(key: string): Promise<void>;
+  save(key: string, value: string): Promise<void>;
+};
+
+export type CryptoAdapter = {
+  digest(algorithm: string, data: BufferSource): Promise<ArrayBuffer>;
+  getRandomValues(array: Uint8Array): Uint8Array;
+};
+
 export type InitArgs = {
   clientId: string;
   clientSecret?: string;
   clientUniqueKey?: string;
   credentialsStorageKey: string;
+  crypto?: CryptoAdapter;
   scopes?: Array<string>;
+  storage?: StorageAdapter;
   tidalAuthServiceBaseUri?: string;
   tidalLoginServiceBaseUri?: string;
 };
 
-export type UserCredentials = {
+export type UserCredentials = Omit<
+  InitArgs,
+  | 'crypto'
+  | 'scopes'
+  | 'storage'
+  | 'tidalAuthServiceBaseUri'
+  | 'tidalLoginServiceBaseUri'
+> & {
   accessToken?: Credentials;
   codeChallenge?: string;
   expiresIn?: number;
@@ -21,17 +41,14 @@ export type UserCredentials = {
   scopes: Array<string>;
   tidalAuthServiceBaseUri: string;
   tidalLoginServiceBaseUri: string;
-} & Omit<
-  InitArgs,
-  'scopes' | 'tidalAuthServiceBaseUri' | 'tidalLoginServiceBaseUri'
->;
+};
 
 export type SocialNetwork = 'APPLE' | 'FACEBOOK' | 'TWITTER';
 
-export type LoginConfig = {
+export type LoginConfig = Record<string, string> & {
   email?: string;
   language?: string;
-} & Record<string, string>;
+};
 
 export type TokenJSONResponse = {
   access_token: string;

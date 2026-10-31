@@ -4,6 +4,8 @@
 Auth module handles Authentication and Authorization when interacting with the TIDAL API or other TIDAL SDKs.
 It provides a simple setup and easy to use SDK to interact with the oAuth2 server endpoints.
 
+For the full specification, see the [Auth specification](https://github.com/tidal-music/tidal-sdk/blob/main/Auth.md).
+
 # Features
 * User Login and Sign up handling (through login.tidal.com)
 * Automatic session refresh (refreshing oAuthTokens)
@@ -23,9 +25,8 @@ This authentication method uses `clientId` and `clientSecret`, e.g. when utilizi
 4. That's it!
 
 ## Authorization Code Flow (user login)
-(Only available for TIDAL internally developed applications for now)
 
-To implement the login redirect flow, follow these steps or refer to our example for ["login redirect"](./examples/login-redirect.html).
+To implement the login redirect flow, follow these steps or refer to our example for ["authorization code"](./examples/authorization-code.html).
 
 1. Initiate the process by calling the `init` function.
 2. For the first login:
@@ -50,6 +51,10 @@ For devices with limited input capabilities, such as TVs, an alternative login m
 
 > 💡 Many modern apps feature a QR-Code for scanning, which you can also generate. Ensure it includes `verificationUriComplete`, as provided in the response.
 
+### Approving in a TIDAL app
+
+Call `initializeDeviceLogin({ appApproval: true })` to get a code that the user approves in a TIDAL app instead of on `link.tidal.com`. `verificationUriComplete` then points to the approval page (e.g. `https://tidal.com/approve/ABCDEFGH`); show it as a QR code for the user to scan with their phone. `finalizeDeviceLogin` works the same way in both modes.
+
 ## Setting Credentials
 
 If your application was previously authenticated, you can migrate these credentials into the auth module by following these steps or checking out our example for ["setting credentials"](./examples/setting-credentials.html).
@@ -64,12 +69,12 @@ If your application was previously authenticated, you can migrate these credenti
 You can find examples in `/examples`, each one is dedicated to one type of receiving credentials.
 Some examples needs a proxy to run, but there is one configured if you use `pnpm dev`.
 
-> Heads up! Redirect login flow requires a secure context and valid https url to work properly.
+> Heads up! Redirect login flow requires a secure context and valid https url to work properly. For running Vite locally with https, check out their documentation for ["Server Options"](https://vite.dev/config/server-options.html#server-https).
 
 For the examples to work you might need to build the library once with `pnpm build`.
 
 # Documentation
-[All public methods are documented and described](https://tidal-music.github.io/tidal-sdk-web/modules/_tidal_music_auth.html). Please also have a look at the examples since they should document most use cases.
+[All public methods are documented and described](https://tidal-music.github.io/tidal-sdk-web/modules/_tidal-music_auth.html). Please also have a look at the examples since they should document most use cases.
 
 
 # Development

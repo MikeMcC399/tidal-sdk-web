@@ -6,7 +6,7 @@ import {
   getEncryptionKey,
   unwrapCryptoKey,
   wrapCryptoKey,
-} from './storageUtils';
+} from './storageUtils.js';
 
 describe('storageUtils', () => {
   beforeEach(() => {
@@ -116,7 +116,7 @@ describe('storageUtils', () => {
           hash: 'SHA-256',
           iterations: 100000,
           name: 'PBKDF2',
-          salt: salt,
+          salt,
         },
         undefined,
         { length: 256, name: 'AES-KW' },
@@ -154,7 +154,7 @@ describe('storageUtils', () => {
           hash: 'SHA-256',
           iterations: 100000,
           name: 'PBKDF2',
-          salt: salt,
+          salt,
         },
         undefined,
         { length: 256, name: 'AES-KW' },

@@ -1,11 +1,11 @@
-import { playerState } from '../../player/state';
+import { playerState } from '../../player/state.js';
 
 /**
  * Pause playback of active media product in the active player.
  *
  * Playback will pause and state transition to NOT_PLAYING.
  *
- * @see {@link import('../../api/event/playback-state-change').PlaybackStateChange}
+ * @see {@link PlaybackStateChange}
  */
 export function pause() {
   return playerState.activePlayer?.pause();

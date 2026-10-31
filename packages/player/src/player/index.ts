@@ -1,17 +1,19 @@
-import { events } from '../event-bus';
-import type { AudioQuality } from '../internal/types';
+import type { MediaProduct } from '../api/interfaces.js';
+import { events } from '../event-bus.js';
+import { mimeTypes } from '../internal/constants.js';
+import type { AudioQuality } from '../internal/types.js';
 
-import type { default as BrowserPlayerType } from './browserPlayer';
-import type { default as NativePlayerType } from './nativePlayer';
-import type { default as ShakaPlayerType } from './shakaPlayer';
-import { playerState } from './state';
+import type { default as BrowserPlayerType } from './browserPlayer.js';
+import type { default as NativePlayerType } from './nativePlayer.js';
+import type { default as ShakaPlayerType } from './shakaPlayer.js';
+import { playerState } from './state.js';
 
 let endedHandler: EventListenerOrEventListenerObject;
 
 type Player = BrowserPlayerType | NativePlayerType | ShakaPlayerType;
 
 export type PlayerConfig = {
-  itemTypes: Array<'track' | 'video'>;
+  itemTypes: Array<MediaProduct['productType']>;
   player: 'browser' | 'native' | 'shaka';
   qualities?: Array<AudioQuality>;
 };
@@ -94,8 +96,8 @@ export function cancelQueuedOnendedHandler() {
   events.removeEventListener('ended', endedHandler);
 }
 
-export function maybeSwitchPlayerOnEnd(preloadPlayer: Player) {
-  if (preloadPlayer === playerState.activePlayer) {
+export function maybeSwitchPlayerOnEnd(preloadPlayer: Player | undefined) {
+  if (!preloadPlayer || preloadPlayer.name === playerState.activePlayer?.name) {
     return;
   }
 
@@ -106,7 +108,7 @@ export function maybeSwitchPlayerOnEnd(preloadPlayer: Player) {
 }
 
 export async function getNativePlayer() {
-  const { default: NativePlayer } = await import('./nativePlayer');
+  const { default: NativePlayer } = await import('./nativePlayer.js');
 
   if (!players.native) {
     players.native = new NativePlayer();
@@ -116,7 +118,7 @@ export async function getNativePlayer() {
 }
 
 async function getBrowserPlayer() {
-  const { default: BrowserPlayer } = await import('./browserPlayer');
+  const { default: BrowserPlayer } = await import('./browserPlayer.js');
 
   if (!players.browser) {
     players.browser = new BrowserPlayer();
@@ -126,7 +128,7 @@ async function getBrowserPlayer() {
 }
 
 async function getShakaPlayer() {
-  const { default: ShakaPlayer } = await import('./shakaPlayer');
+  const { default: ShakaPlayer } = await import('./shakaPlayer.js');
 
   if (!players.shaka) {
     players.shaka = new ShakaPlayer();
@@ -135,9 +137,33 @@ async function getShakaPlayer() {
   return players.shaka;
 }
 
+/**
+ * Predicts which player type will be used for a given product type and audio quality.
+ * This is useful for determining the player before fetching playback info.
+ */
+export function predictPlayerType(
+  productType: 'track' | 'video',
+  audioQuality: AudioQuality | undefined,
+): 'browser' | 'native' | 'shaka' {
+  const appropriatePlayers = playerConfig
+    .filter(pc => pc.itemTypes.includes(productType))
+    .filter(pc =>
+      productType === 'track' && pc.qualities && audioQuality
+        ? pc.qualities.includes(audioQuality)
+        : true,
+    );
+
+  if (appropriatePlayers.length === 0) {
+    return 'shaka'; // Default fallback
+  }
+
+  return appropriatePlayers[0]!.player;
+}
+
 export async function getAppropriatePlayer(
   productType: 'track' | 'video',
   audioQuality: AudioQuality | undefined,
+  mimeType: string,
 ) {
   const appropriatePlayers = playerConfig
     .filter(pc => pc.itemTypes.includes(productType))
@@ -156,15 +182,23 @@ export async function getAppropriatePlayer(
     );
   }
 
-  const { player } = appropriatePlayers[0]!;
+  let { player } = appropriatePlayers[0]!;
+
+  // ** Native player doesn't support DASH or HLS, so override to Shaka player.
+  if (
+    (mimeType === mimeTypes.DASH || mimeType === mimeTypes.HLS) &&
+    player === 'native'
+  ) {
+    player = 'shaka';
+  }
 
   switch (player) {
-    case 'shaka':
-      return getShakaPlayer();
     case 'browser':
       return getBrowserPlayer();
     case 'native':
       return getNativePlayer();
+    case 'shaka':
+      return getShakaPlayer();
     default:
       throw new Error('No player found.');
   }

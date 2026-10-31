@@ -3,6 +3,8 @@
 ## Description
 This module is only intended for internal use at TIDAL, but feel free to look at the code.
 
+For the full specification, see the [EventProducer specification](https://github.com/tidal-music/tidal-sdk/blob/main/EventProducer.md).
+
 Transportation layer (TL) - The part of event platform that is responsible for transporting events from
 the app to the backend.
 
@@ -92,3 +94,60 @@ async function main() {
 
 
 ```
+
+### Draining the queue (logout / profile switch)
+
+Queued events are only sent on the scheduler's interval, so events produced right
+before a user logs out can be left in the queue. If the credentials provider then
+throws because nobody is logged in, they stay there until the next login.
+
+Call `flush()` before signing out or switching the active user to submit everything
+that is queued while the current credentials are still available:
+
+```typescript
+import { flush } from '@tidal-music/event-producer';
+
+async function logout() {
+  // Waits for any sendEvent() calls still being prepared, then submits.
+  // Best effort: resolves when the queue is empty or a batch fails.
+  // Rejects only if no credentialsProvider is set or getCredentials() rejects.
+  await flush().catch(console.error);
+  // ...now swap the credentials provider / sign out
+}
+```
+
+Notes:
+
+- Each event carries its own authorization header and user payload from the moment
+  it was produced, and the backend attributes events from that record. Events left
+  over after a failed `flush()` are still attributed to the user who produced them,
+  so it is safe for them to be sent later.
+- A credentials provider that returns client credentials (no user token) when nobody
+  is logged in lets the queue drain through `tlPublicConsumerUri` instead of stalling.
+- `flush()` shares the in-flight submit with the scheduler: if a scheduled submit is
+  already running, `flush()` awaits that run rather than starting a second one.
+
+#### Leaving nothing behind
+
+If the requirement is that no data from the outgoing user remains on the device,
+pass `{ discardUnsent: true }`. `flush()` still submits everything it can first;
+whatever is left after that (for example because the network is down or nobody is
+logged in any more) is dropped from memory and from IndexedDB, and the promise
+resolves once the store is confirmed empty.
+
+```typescript
+const { discarded } = await flush({ discardUnsent: true });
+if (discarded > 0) {
+  console.warn(`${discarded} events could not be delivered and were discarded`);
+}
+```
+
+Discarded events are lost for good, including playback events that count towards
+the user's listening history. Use this option only when the outgoing user's data
+must not remain on the device, i.e. signing out on a shared, public or otherwise
+untrusted device (kiosk, hotel TV, borrowed browser).
+
+On a personal device prefer a plain `flush()`: leftover events are delivered on a
+later run and stay attributed to the user who produced them. Never call
+`flush({ discardUnsent: true })` on a schedule, at startup, on token refresh or as
+a general clean-up.

@@ -1,21 +1,26 @@
 import '@vitest/web-worker';
 import { js2xml } from 'xml-js';
 
-import { config } from '../../test/fixtures/config';
-import { epEvent1 } from '../../test/fixtures/events';
-import * as monitor from '../monitor';
-import * as outage from '../outage';
-import * as queue from '../queue';
+import { config } from '../../test/fixtures/config.js';
+import { epEvent1 } from '../../test/fixtures/events.js';
+import * as monitor from '../monitor/index.js';
+import * as outage from '../outage/index.js';
+import * as queue from '../queue/index.js';
 
-import { submitEvents } from './submit';
+import { submitEvents } from './submit.js';
 
 vi.mock('../queue');
 vi.mock('../monitor');
 
-describe.sequential('submit', () => {
+describe('submit', { concurrent: false }, () => {
   beforeEach(() => {
     vi.mocked(queue).getEvents.mockReturnValue([]);
     vi.mocked(queue).getEventBatch.mockReturnValue([]);
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it('fails to send if no credentialsProvider is set', async () => {
@@ -280,6 +285,28 @@ describe.sequential('submit', () => {
     expect(queue.removeEvents).toHaveBeenCalledWith([]);
   });
 
+  it('does not loop on a batch that made no progress (retryable BatchResultErrorEntry)', async () => {
+    vi.mocked(queue).getEventBatch.mockReturnValue([epEvent1]);
+    // the retryable event stays in the queue after the batch
+    vi.mocked(queue).getEvents.mockReturnValue([epEvent1]);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        text: vi
+          .fn()
+          .mockResolvedValue(
+            `<?xml version="1.0"?><SendMessageBatchResponse><SendMessageBatchResult><BatchResultErrorEntry><Id>${epEvent1.id}</Id><SenderFault>false</SenderFault></BatchResultErrorEntry></SendMessageBatchResult></SendMessageBatchResponse>`,
+          ),
+      }),
+    );
+
+    await submitEvents({ config });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(queue.removeEvents).toHaveBeenCalledWith([]);
+  });
+
   it('error response with AWS.SimpleQueueService.BatchEntryIdsNotDistinct removes duplicates', async () => {
     vi.mocked(queue).getEventBatch.mockReturnValue([epEvent1, epEvent1]);
     vi.mocked(queue).getEvents.mockReturnValue([epEvent1, epEvent1]);
@@ -298,5 +325,128 @@ describe.sequential('submit', () => {
     await submitEvents({ config });
 
     expect(queue.setEvents).toHaveBeenCalledWith([epEvent1]);
+  });
+
+  it('triggers outage on fetch timeout (AbortError) and does not remove events', async () => {
+    vi.spyOn(outage, 'setOutage');
+    vi.mocked(queue).getEventBatch.mockReturnValue([epEvent1]);
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockRejectedValue(
+          new DOMException('The operation was aborted.', 'AbortError'),
+        ),
+    );
+    await submitEvents({ config });
+
+    expect(outage.setOutage).toHaveBeenCalledWith(true);
+    expect(queue.removeEvents).not.toHaveBeenCalled();
+  });
+
+  it('is single-flight: concurrent calls share one run and one fetch', async () => {
+    vi.mocked(queue).getEventBatch.mockReturnValue([epEvent1]);
+    let resolveFetch: (value: unknown) => void = () => {};
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockReturnValue(
+        new Promise(resolve => {
+          resolveFetch = resolve;
+        }),
+      ),
+    );
+
+    const first = submitEvents({ config });
+    const second = submitEvents({ config });
+
+    expect(second).toBe(first);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+
+    resolveFetch({
+      ok: true,
+      text: vi
+        .fn()
+        .mockResolvedValue(
+          `<?xml version="1.0"?><SendMessageBatchResponse><SendMessageBatchResult><SendMessageBatchResultEntry><Id>${epEvent1.id}</Id></SendMessageBatchResultEntry></SendMessageBatchResult></SendMessageBatchResponse>`,
+        ),
+    });
+    await Promise.all([first, second]);
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(queue.removeEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it('is single-flight: a call after the previous run finished starts a new run', async () => {
+    vi.mocked(queue).getEventBatch.mockReturnValue([epEvent1]);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        text: vi.fn().mockResolvedValue(''),
+      }),
+    );
+
+    await submitEvents({ config });
+    await submitEvents({ config });
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('is single-flight: a rejected run does not block the next one', async () => {
+    vi.mocked(queue).getEventBatch.mockReturnValue([epEvent1]);
+    vi.spyOn(globalThis, 'fetch');
+    const rejectingConfig = {
+      ...config,
+      credentialsProvider: {
+        bus: () => {},
+        getCredentials: vi.fn().mockRejectedValue(new Error('not logged in')),
+      },
+    };
+
+    await expect(submitEvents({ config: rejectingConfig })).rejects.toThrow(
+      'not logged in',
+    );
+    expect(fetch).not.toHaveBeenCalled();
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        text: vi.fn().mockResolvedValue(''),
+      }),
+    );
+    await submitEvents({ config });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a failing response body read as an outage and keeps events queued', async () => {
+    vi.spyOn(outage, 'setOutage');
+    vi.mocked(queue).getEventBatch.mockReturnValue([epEvent1]);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        text: vi.fn().mockRejectedValue(new TypeError('body stream error')),
+      }),
+    );
+
+    await expect(submitEvents({ config })).resolves.toBeUndefined();
+
+    expect(outage.setOutage).toHaveBeenCalledWith(true);
+    expect(queue.removeEvents).not.toHaveBeenCalled();
+  });
+
+  it('triggers outage on network error and does not remove events', async () => {
+    vi.spyOn(outage, 'setOutage');
+    vi.mocked(queue).getEventBatch.mockReturnValue([epEvent1]);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockRejectedValue(new TypeError('Failed to fetch')),
+    );
+    await submitEvents({ config });
+
+    expect(outage.setOutage).toHaveBeenCalledWith(true);
+    expect(queue.removeEvents).not.toHaveBeenCalled();
   });
 });

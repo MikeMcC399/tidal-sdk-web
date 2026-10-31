@@ -1,30 +1,14 @@
 import { expect } from 'chai';
 
-import * as Player from '../';
-import { events } from '../event-bus';
-import type { NativePlayerComponentDeviceDescription } from '../player/nativeInterface';
-import { credentialsProvider } from '../test-helpers';
+import { events } from '../event-bus.js';
+import type { NativePlayerComponentDeviceDescription } from '../player/nativeInterface.js';
 
 import {
   OutputDevice,
   OutputDevices,
   findOutputType,
   getOutputDeviceByName,
-} from './output-devices';
-
-Player.setCredentialsProvider(credentialsProvider);
-
-beforeEach(async () => {
-  await Player.load(
-    {
-      productId: '141120674',
-      productType: 'track',
-      sourceId: 'tidal-player-tests',
-      sourceType: 'tidal-player-tests',
-    },
-    0,
-  );
-});
+} from './output-devices.js';
 
 const defaultWd: MediaDeviceInfo = {
   deviceId: '12d6as',
@@ -159,16 +143,16 @@ describe('OutputDevice', () => {
 describe('OutputDevices', () => {
   const devices = new Set([
     new OutputDevice({
+      name: 'Germanys Saurkraut (1ff:ss:trrtt)',
+      nativeDeviceId: 'native-breaky-supertrouper-booper',
+      type: 'airplay',
+      webDeviceId: 'web-breaky-supertrouper-booper',
+    }),
+    new OutputDevice({
       name: 'My Cool Speaker (Bluetooth)',
       nativeDeviceId: 'native-breaky-superliscous-disher',
       type: 'bluetooth',
       webDeviceId: 'web-breaky-superliscous-disher',
-    }),
-    new OutputDevice({
-      name: 'Germanys Saurkraut (1ff:ss:trrtt)',
-      nativeDeviceId: 'native-breaky-supertrouper-booper',
-      type: 'mqa',
-      webDeviceId: 'web-breaky-supertrouper-booper',
     }),
   ]);
 
@@ -204,11 +188,11 @@ describe('OutputDevices', () => {
     }
   });
 
-  it('can detect output type if native device is mqa', () => {
+  it('can detect output type if native device is airplay', () => {
     const before = getOutputDeviceByName(devices, 'Germanys Saurkraut');
 
     if (before) {
-      expect(before.type).to.equal('mqa');
+      expect(before.type).to.equal('airplay');
     }
   });
 
@@ -223,23 +207,11 @@ describe('OutputDevices', () => {
     expect(outputDevices.deviceMode).to.equal('exclusive');
   });
 
-  // TODO: Add active device and boot player to fix test.
-  it.skip('can change pass through mode', () => {
-    const outputDevices = new OutputDevices();
-
-    expect(outputDevices.passThrough).to.equal(undefined);
-
-    outputDevices.passThrough = true;
-
-    expect(outputDevices.passThrough).to.equal(true);
-  });
-
   // eslint-disable-next-line vitest/expect-expect
   it('emits devicechange event when emitDeviceChange is called', done => {
     const outputDevices = new OutputDevices();
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-    events.addEventListener('device-change', () => done());
+    events.addEventListener('device-change', () => done(), { once: true });
 
     outputDevices.emitDeviceChange();
   });
