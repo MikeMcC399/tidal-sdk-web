@@ -5,11 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.55.0] - 2026-11-06
+## [0.55.0] - 2026-11-07
 
 ### Changed
 
-- Sync to new API definitions (version: 1.10.227)
+- Sync to new API definitions (version: 1.10.236)
 ## [0.54.1] - 2026-10-28
 
 ### Added
