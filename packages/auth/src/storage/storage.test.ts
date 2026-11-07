@@ -1,13 +1,14 @@
-import { authErrorCodeMap } from '../errors';
-import * as fixtures from '../fixtures';
+import { authErrorCodeMap } from '../errors/index.js';
+import * as fixtures from '../fixtures.js';
 
-import { database as _database } from './database';
+import { database as _database } from './database.js';
 import {
   deleteCredentials,
   loadCredentials,
   saveCredentialsToStorage,
-} from './storage';
-import * as _storageUtils from './storageUtils';
+  setStorageAdapter,
+} from './storage.js';
+import * as _storageUtils from './storageUtils.js';
 
 const database = vi.mocked(_database);
 const storageUtils = vi.mocked(_storageUtils);
@@ -22,11 +23,14 @@ vi.mock('./database', () => ({
   },
 }));
 
-describe.sequential('storage', () => {
+describe('storage', { concurrent: false }, () => {
   beforeEach(() => {
     vi.stubGlobal('crypto', {
       getRandomValues: vi.fn(),
     });
+
+    // Reset all mocks before each test
+    vi.clearAllMocks();
   });
   describe('loadCredentials', () => {
     it('loads credentials from local storage', async () => {
@@ -44,7 +48,7 @@ describe.sequential('storage', () => {
       database.getItem.mockReturnValue(new Uint8Array(16));
       storageUtils.decodeCredentials.mockReturnValueOnce('{{{');
 
-      await expect(async () => await loadCredentials('key')).rejects.toThrow(
+      await expect(loadCredentials('key')).rejects.toThrow(
         authErrorCodeMap.storageError,
       );
     });
@@ -63,9 +67,12 @@ describe.sequential('storage', () => {
         throw new Error('Storage is not available');
       });
 
-      await expect(async () => await loadCredentials('key')).rejects.toThrow(
+      await expect(loadCredentials('key')).rejects.toThrow(
         authErrorCodeMap.storageError,
       );
+
+      // Reset the mock implementation for subsequent tests
+      database.setItem.mockReset();
     });
   });
 
@@ -125,11 +132,10 @@ describe.sequential('storage', () => {
       });
 
       await expect(
-        async () =>
-          await saveCredentialsToStorage({
-            clientId: 'foobar',
-            credentialsStorageKey: 'key',
-          }),
+        saveCredentialsToStorage({
+          clientId: 'foobar',
+          credentialsStorageKey: 'key',
+        }),
       ).rejects.toThrowError(authErrorCodeMap.storageError);
     });
 
@@ -137,11 +143,10 @@ describe.sequential('storage', () => {
       database.getItem.mockReturnValue(undefined);
 
       await expect(
-        async () =>
-          await saveCredentialsToStorage({
-            clientId: 'foobar',
-            credentialsStorageKey: 'key',
-          }),
+        saveCredentialsToStorage({
+          clientId: 'foobar',
+          credentialsStorageKey: 'key',
+        }),
       ).rejects.toThrowError(authErrorCodeMap.storageError);
     });
   });
@@ -155,6 +160,79 @@ describe.sequential('storage', () => {
       expect(database.removeItem).toBeCalledWith('myKeyData');
       expect(database.removeItem).toBeCalledWith('myKeyKey');
       expect(database.removeItem).toBeCalledWith('myKeyCounter');
+    });
+  });
+
+  describe('custom StorageAdapter', () => {
+    const mockAdapter = {
+      load: vi.fn(),
+      remove: vi.fn(),
+      save: vi.fn(),
+    };
+
+    beforeAll(() => {
+      setStorageAdapter(mockAdapter);
+    });
+
+    it('loads credentials via the custom adapter', async () => {
+      mockAdapter.load.mockResolvedValue(JSON.stringify(fixtures.storage));
+
+      const result = await loadCredentials('key');
+
+      expect(mockAdapter.load).toHaveBeenCalledWith('key');
+      expect(result).toEqual(fixtures.storage);
+      expect(database.getItem).not.toHaveBeenCalled();
+    });
+
+    it('returns undefined when custom adapter has no data', async () => {
+      mockAdapter.load.mockResolvedValue(null);
+
+      const result = await loadCredentials('key');
+
+      expect(result).toBeUndefined();
+    });
+
+    it('saves credentials via the custom adapter', async () => {
+      mockAdapter.load.mockResolvedValue(null);
+
+      await saveCredentialsToStorage({
+        clientId: 'foobar',
+        credentialsStorageKey: 'key',
+      });
+
+      expect(mockAdapter.save).toHaveBeenCalledWith(
+        'key',
+        JSON.stringify({ clientId: 'foobar', credentialsStorageKey: 'key' }),
+      );
+      expect(database.setItem).not.toHaveBeenCalled();
+    });
+
+    it('merges with existing credentials when saving', async () => {
+      mockAdapter.load.mockResolvedValue(
+        JSON.stringify({ clientId: 'old', scopes: ['READ'] }),
+      );
+
+      await saveCredentialsToStorage({
+        clientId: 'new',
+        credentialsStorageKey: 'key',
+      });
+
+      expect(mockAdapter.save).toHaveBeenCalledWith(
+        'key',
+        JSON.stringify({
+          clientId: 'new',
+          scopes: ['READ'],
+          // eslint-disable-next-line perfectionist/sort-objects
+          credentialsStorageKey: 'key',
+        }),
+      );
+    });
+
+    it('deletes credentials via the custom adapter', () => {
+      deleteCredentials('key');
+
+      expect(mockAdapter.remove).toHaveBeenCalledWith('key');
+      expect(database.removeItem).not.toHaveBeenCalled();
     });
   });
 });

@@ -1,14 +1,16 @@
 import '@vitest/web-worker';
 
-import { config } from '../../test/fixtures/config';
-import { init as initConfig } from '../config';
-import * as monitor from '../monitor';
-import * as submit from '../submit/submit';
+import { config } from '../../test/fixtures/config.js';
+import { epEvent1 } from '../../test/fixtures/events.js';
+import { init as initConfig } from '../config.js';
+import * as monitor from '../monitor/index.js';
+import * as queue from '../queue/index.js';
+import * as submit from '../submit/submit.js';
 
-import * as scheduler from './scheduler';
+import * as scheduler from './scheduler.js';
 
 vi.useFakeTimers();
-describe.sequential('Scheduler', () => {
+describe('Scheduler', { concurrent: false }, () => {
   beforeEach(() => {
     initConfig(config);
     vi.stubGlobal('console', { error: vi.fn() });
@@ -40,6 +42,34 @@ describe.sequential('Scheduler', () => {
 
     expect(submit.submitEvents).toHaveBeenCalledWith({ config });
     expect(console.error).toHaveBeenCalledWith(fakeError);
+  });
+
+  it('does not start a second submit while one is still in flight', async () => {
+    vi.spyOn(submit, 'submitEvents');
+    vi.spyOn(queue, 'getEventBatch').mockReturnValue([epEvent1]);
+    // hold the fetch open so the first submit stays in flight across ticks
+    let resolveFetch: (value: unknown) => void = () => {};
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockReturnValue(
+        new Promise(resolve => {
+          resolveFetch = resolve;
+        }),
+      ),
+    );
+
+    scheduler.init(config);
+
+    await vi.advanceTimersByTimeAsync(30000);
+    await vi.advanceTimersByTimeAsync(30000);
+    await vi.advanceTimersByTimeAsync(30000);
+
+    expect(submit.submitEvents).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    // finish the run so it does not stay in flight for later tests
+    resolveFetch({ ok: false, text: vi.fn().mockResolvedValue('') });
+    await vi.advanceTimersByTimeAsync(0);
   });
 
   it('interval is configurable', async () => {

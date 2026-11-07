@@ -1,16 +1,16 @@
 import Bowser from 'bowser';
 import levenshtein from 'js-levenshtein';
 
-import { deviceChange } from '../api/event/device-change';
-import { events } from '../event-bus';
+import { deviceChange } from '../api/event/device-change.js';
+import { events } from '../event-bus.js';
 import type {
   NativePlayerComponentDeviceDescription,
   NativePlayerDeviceMode,
-} from '../player/nativeInterface';
-import type NativePlayer from '../player/nativePlayer';
-import { playerState } from '../player/state';
+} from '../player/nativeInterface.js';
+import type NativePlayer from '../player/nativePlayer.js';
+import { playerState } from '../player/state.js';
 
-import { generateGUID } from './helpers/generate-guid';
+import { generateGUID } from './helpers/generate-guid.js';
 
 const platform = Bowser.parse(navigator.userAgent);
 
@@ -20,7 +20,6 @@ export type OutputType =
   | 'builtIn'
   | 'displayPort'
   | 'hdmi'
-  | 'mqa'
   | 'systemDefault'
   | 'usb'
   | 'windowsCommunication';
@@ -77,10 +76,6 @@ export function findOutputType(
   if ('type' in device) {
     if (device.type === 'airplay') {
       return 'airplay';
-    }
-
-    if (device.type === 'mqa') {
-      return 'mqa';
     }
   }
 
@@ -140,7 +135,7 @@ export function isWindowsCommunicationsDevice(
     name = d.name;
   }
 
-  return name !== undefined && name.startsWith('Communications');
+  return name?.startsWith('Communications') ?? false;
 }
 
 export function getOutputDeviceByName(
@@ -153,7 +148,7 @@ export function getOutputDeviceByName(
     return undefined;
   }
 
-  const exactMatch = [...devices].filter(od => od.name === name)[0];
+  const exactMatch = [...devices].find(od => od.name === name);
 
   if (exactMatch) {
     return exactMatch;
@@ -163,7 +158,7 @@ export function getOutputDeviceByName(
     .filter(device => name.includes(device.name) || device.name.includes(name))
     .map(device => ({
       device,
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+
       distance: levenshtein(device.name, name),
     }))
     .sort((a, b) => a.distance - b.distance)
@@ -190,8 +185,6 @@ export class OutputDevices {
   #events: EventTarget;
 
   #nativeDevices: Set<NativePlayerComponentDeviceDescription>;
-
-  #passThrough: boolean | undefined = undefined;
 
   #webDevices: Set<MediaDeviceInfo>;
 
@@ -233,6 +226,18 @@ export class OutputDevices {
     }) as EventListener);
   }
 
+  set activeDevice(device: OutputDevice) {
+    this.#activeDevice = device;
+
+    this.#deviceMode = 'shared';
+
+    playerState.activePlayer?.updateOutputDevice()?.catch(console.error);
+  }
+
+  get activeDevice() {
+    return this.#activeDevice;
+  }
+
   addNativeDevices(devices: Array<NativePlayerComponentDeviceDescription>) {
     this.#events.dispatchEvent(
       new CustomEvent('native-devices', {
@@ -250,6 +255,27 @@ export class OutputDevices {
         detail: devices,
       }),
     );
+  }
+
+  /**
+   * Set the current device mode for the output device.
+   */
+  set deviceMode(deviceMode: NativePlayerDeviceMode) {
+    const { activeDevice } = this;
+    const { activePlayer } = playerState;
+
+    if (
+      activeDevice &&
+      activePlayer?.name === 'nativePlayer' &&
+      this.deviceMode !== deviceMode
+    ) {
+      this.#deviceMode = deviceMode;
+      (activePlayer as NativePlayer).updateDeviceMode();
+    }
+  }
+
+  get deviceMode() {
+    return this.#deviceMode;
   }
 
   emitDeviceChange() {
@@ -360,63 +386,6 @@ export class OutputDevices {
 
     this.mergeDevices();
     this.emitDeviceChange();
-  }
-
-  set activeDevice(device: OutputDevice) {
-    this.#activeDevice = device;
-
-    this.#passThrough = false;
-    this.#deviceMode = 'shared';
-
-    playerState.activePlayer?.updateOutputDevice()?.catch(console.error);
-  }
-
-  get activeDevice() {
-    return this.#activeDevice;
-  }
-
-  /**
-   * Set the current device mode for the output device.
-   */
-  set deviceMode(deviceMode: NativePlayerDeviceMode) {
-    const { activeDevice } = this;
-    const { activePlayer } = playerState;
-
-    if (
-      activeDevice &&
-      activePlayer &&
-      activePlayer.name === 'nativePlayer' &&
-      this.deviceMode !== deviceMode
-    ) {
-      this.#deviceMode = deviceMode;
-      (activePlayer as NativePlayer).updateDeviceMode();
-    }
-  }
-
-  get deviceMode() {
-    return this.#deviceMode;
-  }
-
-  /**
-   * Set to true to disable software MQA decoder.
-   */
-  set passThrough(passThrough: boolean) {
-    const { activeDevice } = this;
-    const { activePlayer } = playerState;
-
-    if (
-      activeDevice &&
-      activePlayer &&
-      activePlayer.name === 'nativePlayer' &&
-      this.passThrough !== passThrough
-    ) {
-      this.#passThrough = passThrough;
-      (activePlayer as NativePlayer).updatePassThrough();
-    }
-  }
-
-  get passThrough() {
-    return Boolean(this.#passThrough);
   }
 }
 

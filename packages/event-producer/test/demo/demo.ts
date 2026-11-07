@@ -1,12 +1,12 @@
-import { init } from '../../src';
-import type { EPEvent } from '../../src';
-import { sendEvent } from '../../src/send/send';
-import { config as configFixture } from '../fixtures/config';
+import { init } from '../../src/index.js';
+import type { EPEvent } from '../../src/index.js';
+import { sendEvent } from '../../src/send/send.js';
+import { config as configFixture } from '../fixtures/config.js';
 import {
   credentials1,
   credentialsProvider1,
-} from '../fixtures/credentialsProvider';
-import { eventPayload1 } from '../fixtures/events';
+} from '../fixtures/credentialsProvider.js';
+import { eventPayload1 } from '../fixtures/events.js';
 
 const setCredentialsToken = (token?: string) => {
   credentials1.token = token;
@@ -40,7 +40,7 @@ class EventDemo extends HTMLElement {
             `<span>${name}</span><button role="remove" evId="${id}">Remove</button>`,
         )
         .join('</li><li>')}</li>
-      </ul><button id="submitEvents">Submit queue</button></div>`;
+      </ul><button id="submitEvents">Flush queue</button></div>`;
     if (this.shadowRoot) {
       const sendEventBtn = this.shadowRoot.querySelector('#sendEventBtn');
       const setCredentialsTokenBtn =

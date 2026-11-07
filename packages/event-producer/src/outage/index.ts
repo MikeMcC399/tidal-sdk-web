@@ -2,9 +2,10 @@ import {
   type ErrorOptions,
   TidalError,
   type TidalMessage,
+  captureStackTrace,
 } from '@tidal-music/common';
 
-import * as bus from '../bus';
+import * as bus from '../bus.js';
 
 /**
  * This read-only property indicates whether or not there is an outage.
@@ -19,6 +20,8 @@ let _isOutage = false;
  * @extends TidalError
  */
 export class OutageStartError extends TidalError {
+  override name = 'OutageStartError';
+
   constructor(errorCode: string, options?: ErrorOptions) {
     super(errorCode, options);
 
@@ -26,11 +29,7 @@ export class OutageStartError extends TidalError {
     Object.setPrototypeOf(this, OutageStartError.prototype);
 
     // Maintains proper stack trace for where our error was thrown (only available on V8)
-    if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, OutageStartError);
-    }
-
-    this.name = 'OutageStartError';
+    captureStackTrace(this, OutageStartError);
   }
 }
 

@@ -1,15 +1,25 @@
 import { expect } from 'chai';
 
-import { credentialsProvider } from '../../test-helpers';
+import {
+  authAndEvents,
+  credentialsProvider,
+  waitFor,
+} from '../../test-helpers.js';
+import { eventSenderStore } from '../index.js';
 
-import { fetchPlaybackInfo } from './playback-info-resolver';
+import { fetchPlaybackInfo } from './playback-info-resolver.js';
 
 describe('playbackInfoResolver', () => {
-  it('fetches playback info if there is only clientId defined, gets preview', async () => {
+  authAndEvents(before, after);
+
+  it('fetches playback info via legacy API if there is only clientId defined, gets preview', async () => {
     const { clientId } = await credentialsProvider.getCredentials();
 
+    // Use playerType: 'native' to test the legacy v1 playbackinfo endpoint
+    // which supports preview access without a full access token
     const result = await fetchPlaybackInfo({
       accessToken: undefined,
+      audioAdaptiveBitrateStreaming: true,
       audioQuality: 'LOSSLESS',
       clientId,
       mediaProduct: {
@@ -18,9 +28,10 @@ describe('playbackInfoResolver', () => {
         sourceId: '',
         sourceType: '',
       },
+      playerType: 'native',
       prefetch: false,
       // eslint-disable-next-line no-restricted-syntax
-      streamingSessionId: 'tidal-player-js-test-' + Date.now(),
+      streamingSessionId: `tidal-player-js-test-${Date.now()}`,
     });
 
     expect(result.assetPresentation).to.equal('PREVIEW');
@@ -28,7 +39,82 @@ describe('playbackInfoResolver', () => {
     expect(result.manifest).to.not.equal(undefined);
   });
 
-  it('fetches playback info if there is an accessToken defined, gets full', async () => {
+  it('fetches playback info via legacy API if there is an accessToken defined, gets full', async () => {
+    const { clientId, token } = await credentialsProvider.getCredentials();
+
+    if (!token) {
+      throw new Error('No access token, cannot fulfill test.');
+    }
+
+    // Use playerType: 'native' to test the legacy v1 playbackinfo endpoint
+    const result = await fetchPlaybackInfo({
+      accessToken: token,
+      audioAdaptiveBitrateStreaming: true,
+      audioQuality: 'LOSSLESS',
+      clientId,
+      mediaProduct: {
+        productId: '1316405',
+        productType: 'track',
+        sourceId: '',
+        sourceType: '',
+      },
+      playerType: 'native',
+      prefetch: false,
+      // eslint-disable-next-line no-restricted-syntax
+      streamingSessionId: `tidal-player-js-test-${Date.now()}`,
+    });
+
+    expect(result.assetPresentation).to.equal('FULL');
+    expect(result.manifestMimeType).to.not.equal(undefined);
+    expect(result.manifest).to.not.equal(undefined);
+  });
+
+  it('fetches playback info via new trackManifests API for shaka player with ABR enabled (multiple qualities)', async () => {
+    const { clientId, token } = await credentialsProvider.getCredentials();
+
+    if (!token) {
+      throw new Error('No access token, cannot fulfill test.');
+    }
+
+    // Default behavior (no playerType or playerType: 'shaka') uses new trackManifests API
+    const result = await fetchPlaybackInfo({
+      accessToken: token,
+      audioAdaptiveBitrateStreaming: true,
+      audioQuality: 'LOSSLESS',
+      clientId,
+      mediaProduct: {
+        productId: '1316405',
+        productType: 'track',
+        sourceId: '',
+        sourceType: '',
+      },
+      playerType: 'shaka',
+      prefetch: false,
+      // eslint-disable-next-line no-restricted-syntax
+      streamingSessionId: `tidal-player-js-test-${Date.now()}`,
+    });
+
+    expect(result.assetPresentation).to.equal('FULL');
+    expect(result.manifestMimeType).to.not.equal(undefined);
+    expect(result.manifest).to.not.equal(undefined);
+
+    // Decode manifest and verify it contains multiple representations (ABR)
+    const decodedManifest = atob(result.manifest);
+
+    // For DASH manifests, count Representation elements
+    // For HLS manifests, count EXT-X-STREAM-INF entries
+    const isDash = result.manifestMimeType === 'application/dash+xml';
+    const representationCount = isDash
+      ? (decodedManifest.match(/<Representation/g) ?? []).length
+      : (decodedManifest.match(/#EXT-X-STREAM-INF/g) ?? []).length;
+
+    expect(
+      representationCount,
+      'ABR manifest should contain multiple quality representations',
+    ).to.be.greaterThan(1);
+  });
+
+  it('fetches playback info via new videoManifests API for video products', async () => {
     const { clientId, token } = await credentialsProvider.getCredentials();
 
     if (!token) {
@@ -37,6 +123,74 @@ describe('playbackInfoResolver', () => {
 
     const result = await fetchPlaybackInfo({
       accessToken: token,
+      audioAdaptiveBitrateStreaming: true,
+      audioQuality: 'HIGH',
+      clientId,
+      mediaProduct: {
+        productId: '75623239',
+        productType: 'video',
+        sourceId: '',
+        sourceType: '',
+      },
+      playerType: 'shaka',
+      prefetch: false,
+      // eslint-disable-next-line no-restricted-syntax
+      streamingSessionId: `tidal-player-js-test-${Date.now()}`,
+    });
+
+    expect(result.assetPresentation).to.not.equal(undefined);
+    expect(result.manifestMimeType).to.not.equal(undefined);
+    expect(result.manifest).to.not.equal(undefined);
+
+    expect('videoId' in result).to.equal(true);
+    if ('videoId' in result) {
+      expect(result.videoId).to.equal(75623239);
+      expect(result.videoQuality).to.equal('HIGH');
+      expect(result.streamType).to.equal('ON_DEMAND');
+    }
+  });
+
+  it('fetches track manifest with shareCode provided', async () => {
+    const { clientId, token } = await credentialsProvider.getCredentials();
+
+    if (!token) {
+      throw new Error('No access token, cannot fulfill test.');
+    }
+
+    const result = await fetchPlaybackInfo({
+      accessToken: token,
+      audioAdaptiveBitrateStreaming: true,
+      audioQuality: 'LOSSLESS',
+      clientId,
+      mediaProduct: {
+        productId: '518309787',
+        productType: 'track',
+        shareCode: '36d1002d-e674-48f6-bd57-626b4eb453b6',
+        sourceId: '',
+        sourceType: '',
+      },
+      playerType: 'shaka',
+      prefetch: false,
+      // eslint-disable-next-line no-restricted-syntax
+      streamingSessionId: `tidal-player-js-test-${Date.now()}`,
+    });
+
+    expect(result.assetPresentation).to.equal('FULL');
+    expect(result.manifestMimeType).to.not.equal(undefined);
+    expect(result.manifest).to.not.equal(undefined);
+  });
+
+  it('fetches playback info with ABR disabled (single quality)', async () => {
+    const { clientId, token } = await credentialsProvider.getCredentials();
+
+    if (!token) {
+      throw new Error('No access token, cannot fulfill test.');
+    }
+
+    // Test with audioAdaptiveBitrateStreaming: false (fixed quality mode)
+    const result = await fetchPlaybackInfo({
+      accessToken: token,
+      audioAdaptiveBitrateStreaming: false,
       audioQuality: 'LOSSLESS',
       clientId,
       mediaProduct: {
@@ -45,13 +199,123 @@ describe('playbackInfoResolver', () => {
         sourceId: '',
         sourceType: '',
       },
+      playerType: 'shaka',
       prefetch: false,
       // eslint-disable-next-line no-restricted-syntax
-      streamingSessionId: 'tidal-player-js-test-' + Date.now(),
+      streamingSessionId: `tidal-player-js-test-${Date.now()}`,
     });
 
     expect(result.assetPresentation).to.equal('FULL');
     expect(result.manifestMimeType).to.not.equal(undefined);
     expect(result.manifest).to.not.equal(undefined);
+
+    // Decode manifest and verify it contains only one representation (fixed quality)
+    const decodedManifest = atob(result.manifest);
+
+    // For DASH manifests, count Representation elements
+    // For HLS manifests, count EXT-X-STREAM-INF entries
+    const isDash = result.manifestMimeType === 'application/dash+xml';
+    const representationCount = isDash
+      ? (decodedManifest.match(/<Representation/g) ?? []).length
+      : (decodedManifest.match(/#EXT-X-STREAM-INF/g) ?? []).length;
+
+    expect(
+      representationCount,
+      'Non-ABR manifest should contain exactly one quality representation',
+    ).to.equal(1);
+  });
+
+  it('commits playback_info_fetch with endReason ERROR when the fetch fails', async () => {
+    const { clientId, token } = await credentialsProvider.getCredentials();
+
+    if (!token) {
+      throw new Error('No access token, cannot fulfill test.');
+    }
+
+    type SentEvent = {
+      name: string;
+      payload: {
+        endReason?: string;
+        errorCode?: string | null;
+        streamingSessionId?: string;
+      };
+    };
+    const sentEvents: Array<SentEvent> = [];
+    const originalEventSender = eventSenderStore.eventSender;
+
+    eventSenderStore.eventSender = {
+      ...originalEventSender,
+      sendEvent(event: Parameters<typeof originalEventSender.sendEvent>[0]) {
+        sentEvents.push(event as SentEvent);
+      },
+    };
+
+    try {
+      let thrownError: unknown;
+
+      // eslint-disable-next-line no-restricted-syntax
+      const streamingSessionId = `tidal-player-js-test-${Date.now()}`;
+
+      try {
+        await fetchPlaybackInfo({
+          accessToken: token,
+          audioAdaptiveBitrateStreaming: true,
+          audioQuality: 'LOSSLESS',
+          clientId,
+          mediaProduct: {
+            // Nonexistent track id, the manifest fetch responds with an error
+            productId: '0',
+            productType: 'track',
+            sourceId: '',
+            sourceType: '',
+          },
+          playerType: 'shaka',
+          prefetch: false,
+          streamingSessionId,
+        });
+      } catch (e) {
+        thrownError = e;
+      }
+
+      expect(thrownError, 'fetchPlaybackInfo should throw').to.not.equal(
+        undefined,
+      );
+
+      // The event is committed in a fire-and-forget fashion, poll for it.
+      // Scope the lookup to this test's session; telemetry from earlier
+      // tests is also fire-and-forget and can arrive after our sender stub
+      // is installed.
+      let playbackInfoFetchEvent: SentEvent | undefined;
+      for (let i = 0; i < 40 && !playbackInfoFetchEvent; i++) {
+        playbackInfoFetchEvent = sentEvents.find(
+          event =>
+            event.name === 'playback_info_fetch' &&
+            event.payload.streamingSessionId === streamingSessionId,
+        );
+        if (!playbackInfoFetchEvent) {
+          await waitFor(50);
+        }
+      }
+
+      if (!playbackInfoFetchEvent) {
+        throw new Error('No playback_info_fetch event was sent.');
+      }
+
+      // The reported errorCode should be the structured PlayerError code
+      // (falling back to the error message for plain errors), not just any
+      // non-empty value.
+      const expectedErrorCode =
+        (thrownError as { errorCode?: string }).errorCode ??
+        (thrownError as Error).message;
+
+      expect(playbackInfoFetchEvent.payload.endReason).to.equal('ERROR');
+      expect(playbackInfoFetchEvent.payload.errorCode).to.equal(
+        expectedErrorCode,
+      );
+      expect(playbackInfoFetchEvent.payload.errorCode).to.be.a('string');
+      expect(playbackInfoFetchEvent.payload.errorCode).to.have.length.above(0);
+    } finally {
+      eventSenderStore.eventSender = originalEventSender;
+    }
   });
 });

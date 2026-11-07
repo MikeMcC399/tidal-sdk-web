@@ -1,7 +1,7 @@
-import type { PlaybackContext } from '../../api/interfaces';
+import type { PlaybackContext } from '../../api/interfaces.js';
 
-import type { StreamInfo } from './manifest-parser';
-import type { PlaybackInfo } from './playback-info-resolver';
+import type { StreamInfo } from './manifest-parser.js';
+import type { PlaybackInfo } from './playback-info-resolver.js';
 
 type Params = {
   assetPosition: number;
@@ -29,8 +29,10 @@ export const composePlaybackContext = ({
   actualVideoQuality:
     'videoQuality' in playbackInfo ? playbackInfo.videoQuality : null,
   assetPosition,
+  bandwidth: null,
   bitDepth: streamInfo.bitDepth ?? null,
   codec: streamInfo.codec ?? null,
   playbackSessionId: streamInfo.streamingSessionId,
+  previewReason: playbackInfo.previewReason ?? undefined,
   sampleRate: streamInfo.sampleRate ?? null,
 });

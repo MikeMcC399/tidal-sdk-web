@@ -1,0 +1,62 @@
+import type { CredentialsProvider } from '@tidal-music/common';
+import createClient, { type Middleware } from 'openapi-fetch';
+
+import type { paths } from './allAPI.generated.js';
+import { type RetryOptions, fetchWithRetry } from './retry.js';
+
+/**
+ * Create a Tidal API client with the provided credentials.
+ *
+ * @param credentialsProvider The credentials provider, from Auth module.
+ * @param baseUrl Override the base URL to use for the API client.
+ * @param retryOptions Customize the retry mechanism applied to read-only
+ *   (GET/HEAD/OPTIONS) requests. Pass `{ enabled: false }` to disable it.
+ * @returns A Tidal API client.
+ */
+export function createAPIClient(
+  credentialsProvider: CredentialsProvider,
+  baseUrl = 'https://openapi.tidal.com/v2/',
+  retryOptions?: RetryOptions,
+) {
+  const authMiddleware: Middleware = {
+    async onRequest({ request }) {
+      const { token } = await credentialsProvider.getCredentials();
+
+      // A provider without a token has nothing to authenticate with: it is
+      // logged out, or was only ever given a clientId. Sending the request
+      // regardless would put the string "undefined" in the header and come
+      // back as an opaque 401, so fail before the round trip instead.
+      if (!token) {
+        throw new Error(
+          'No access token available from the credentials provider',
+        );
+      }
+
+      // Add Authorization header to every request
+      request.headers.set('Authorization', `Bearer ${token}`);
+
+      // Set JsonAPI Content-Type header for requests with data
+      if (
+        request.method === 'POST' ||
+        request.method === 'PATCH' ||
+        request.method === 'DELETE'
+      ) {
+        request.headers.set('Content-Type', 'application/vnd.api+json');
+      }
+
+      return request;
+    },
+  };
+
+  const apiClient = createClient<paths>({
+    baseUrl,
+    // Retry read-only (GET/HEAD/OPTIONS) requests on transient failures.
+    fetch: fetchWithRetry(retryOptions),
+    // Preserve commas and reserved characters in query values (e.g. JSON:API
+    // `include` lists and `page[cursor]`) so gateways parse them as intended.
+    querySerializer: { allowReserved: true },
+  });
+  apiClient.use(authMiddleware);
+
+  return apiClient;
+}

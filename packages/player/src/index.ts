@@ -1,14 +1,14 @@
-import * as Config from './config';
-import { trueTime } from './internal/true-time';
+import * as Config from './config.js';
+import { trueTime } from './internal/true-time.js';
 import {
   activateVideoElements,
   mountVideoElements,
-} from './player/audio-context-store';
-import type BrowserPlayer from './player/browserPlayer';
-import type { PlayerConfig } from './player/index';
-import { setPlayerConfig } from './player/index';
-import type ShakaPlayer from './player/shakaPlayer';
-import { playerState } from './player/state';
+} from './player/audio-context-store.js';
+import type BrowserPlayer from './player/browserPlayer.js';
+import type { PlayerConfig } from './player/index.js';
+import { setPlayerConfig } from './player/index.js';
+import type ShakaPlayer from './player/shakaPlayer.js';
+import { playerState } from './player/state.js';
 
 trueTime.synchronize().then().catch(console.error);
 
@@ -30,10 +30,10 @@ export function getMediaElement(): HTMLMediaElement | null {
   }
 
   switch (player.name) {
-    case 'shakaPlayer':
-      return (player as ShakaPlayer).mediaElement;
     case 'browserPlayer':
       return (player as BrowserPlayer).mediaElement;
+    case 'shakaPlayer':
+      return (player as ShakaPlayer).mediaElement;
     default:
       return null;
   }
@@ -54,20 +54,37 @@ export function bootstrap(options: Options) {
   setPlayerConfig(options.players);
 }
 
+/**
+ * Remove the old IDB database which was used for storing events.
+ */
+function removeOldIDB() {
+  const ssuid = localStorage.getItem('ssuid');
+
+  try {
+    if (ssuid) {
+      indexedDB.deleteDatabase('streaming-sessions-' + ssuid);
+    }
+  } catch (e) {
+    console.warn(`DB streaming-sessions-${ssuid} could not be deleted`);
+    console.error(e);
+  }
+}
+
 mountVideoElements().then().catch(console.error);
 activateVideoElements().then().catch(console.error);
+removeOldIDB();
 
-export * from './api/index';
-export type * from './api/index';
-export type * from './api/interfaces';
+export * from './api/index.js';
+export type * from './api/index.js';
+export type * from './api/interfaces.js';
 
-export { events } from './event-bus';
+export { events } from './event-bus.js';
 export type {
-  ErrorCodes,
   PlayerErrorInterface as Error,
-} from './internal/index';
+  ErrorCodes,
+} from './internal/index.js';
 
-export type { OutputDevice } from './internal/output-devices';
+export type { OutputDevice } from './internal/output-devices.js';
 
 export type {
   AssetPresentation,
@@ -76,5 +93,5 @@ export type {
   Codec,
   StreamType,
   VideoQuality,
-} from './internal/types';
-export type { NativePlayerDeviceMode as DeviceMode } from './player/nativeInterface';
+} from './internal/types.js';
+export type { NativePlayerDeviceMode as DeviceMode } from './player/nativeInterface.js';

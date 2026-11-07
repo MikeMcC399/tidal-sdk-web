@@ -1,12 +1,10 @@
 import { expect } from 'chai';
 
-import * as Player from '../../index';
-import { OutputDevice } from '../../internal/output-devices';
-import { credentialsProvider } from '../../test-helpers';
+import * as Player from '../../index.js';
+import { OutputDevice } from '../../internal/output-devices.js';
+import { authAndEvents } from '../../test-helpers.js';
 
-import { deviceChange } from './device-change';
-
-Player.setCredentialsProvider(credentialsProvider);
+import { deviceChange } from './device-change.js';
 
 beforeEach(async () => {
   await Player.load(
@@ -21,6 +19,8 @@ beforeEach(async () => {
 });
 
 describe('deviceChange', () => {
+  authAndEvents(before, after);
+
   it('creates a CustomEvent with a predetermined name', () => {
     const device = new OutputDevice({
       controllableVolume: true,

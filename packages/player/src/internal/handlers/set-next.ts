@@ -1,21 +1,23 @@
-import type { MediaProduct } from '../../api/interfaces';
-import * as Config from '../../config';
-import { generateGUID } from '../../internal/helpers/generate-guid';
-import { parseManifest } from '../../internal/helpers/manifest-parser';
-import { fetchPlaybackInfo } from '../../internal/helpers/playback-info-resolver';
-import type { PlaybackInfo } from '../../internal/helpers/playback-info-resolver';
+import type { MediaProduct } from '../../api/interfaces.js';
+import * as Config from '../../config.js';
+import { generateGUID } from '../../internal/helpers/generate-guid.js';
+import { getIsPostPaywall } from '../../internal/helpers/get-is-post-paywall.js';
+import { parseManifest } from '../../internal/helpers/manifest-parser.js';
+import { fetchPlaybackInfo } from '../../internal/helpers/playback-info-resolver.js';
+import type { PlaybackInfo } from '../../internal/helpers/playback-info-resolver.js';
 import {
   cancelQueuedOnendedHandler,
   getAppropriatePlayer,
   maybeSwitchPlayerOnEnd,
+  predictPlayerType,
   unloadPreloadedMediaProduct,
-} from '../../player/index';
-import { playerState } from '../../player/state';
-import * as PlayLog from '../event-tracking/play-log/index';
-import * as StreamingMetrics from '../event-tracking/streaming-metrics/index';
-import { streamingSessionStore } from '../helpers/streaming-session-store';
-import { credentialsProviderStore } from '../index';
-import { trueTime } from '../true-time';
+} from '../../player/index.js';
+import { playerState } from '../../player/state.js';
+import * as PlayLog from '../event-tracking/play-log/index.js';
+import * as StreamingMetrics from '../event-tracking/streaming-metrics/index.js';
+import { streamingSessionStore } from '../helpers/streaming-session-store.js';
+import { credentialsProviderStore, eventSenderStore } from '../index.js';
+import { trueTime } from '../true-time.js';
 
 let controller: AbortController;
 
@@ -32,6 +34,10 @@ async function _setNext(
   mediaProduct?: MediaProduct,
   sessionTags: Array<string> = [],
 ) {
+  if (!eventSenderStore.hasEventSender()) {
+    throw new Error('Playback not allowed without an event sender.');
+  }
+
   cancelQueuedOnendedHandler();
 
   // If next handler is called with undefined/null as media product, we treat that as an unset.
@@ -41,10 +47,13 @@ async function _setNext(
 
   const streamingSessionId = generateGUID();
 
+  // For repeat playbacks, we clone the streaming session to a new streaming session id.
   if (
     playerState.preloadedStreamingSessionId &&
-    playerState.preloadedMediaProduct &&
-    playerState.preloadedMediaProduct.productId === mediaProduct.productId
+    playerState.preloadedMediaProduct?.productId === mediaProduct.productId &&
+    streamingSessionStore.hasStartedStreamInfo(
+      playerState.preloadedStreamingSessionId,
+    )
   ) {
     streamingSessionStore.clone(
       playerState.preloadedStreamingSessionId,
@@ -54,20 +63,21 @@ async function _setNext(
 
   const startTimestamp = trueTime.now();
 
-  StreamingMetrics.commit({
-    events: [
-      StreamingMetrics.streamingSessionStart({
-        sessionTags,
-        startReason: 'IMPLICIT',
-        streamingSessionId,
-        timestamp: startTimestamp,
-      }),
-    ],
-  }).catch(console.error);
+  StreamingMetrics.commit([
+    StreamingMetrics.streamingSessionStart({
+      sessionTags,
+      startReason: 'IMPLICIT',
+      streamingSessionId,
+      timestamp: startTimestamp,
+    }),
+  ]).catch(console.error);
 
   const { clientId, token } =
     await credentialsProviderStore.credentialsProvider.getCredentials();
 
+  const audioAdaptiveBitrateStreaming = Config.get(
+    'audioAdaptiveBitrateStreaming',
+  );
   const streamingWifiAudioQuality = Config.get('streamingWifiAudioQuality');
 
   let playbackInfo: PlaybackInfo | undefined;
@@ -82,12 +92,19 @@ async function _setNext(
   }
 
   if (playbackInfo === undefined) {
+    const playerType = predictPlayerType(
+      mediaProduct.productType,
+      streamingWifiAudioQuality,
+    );
+
     try {
       playbackInfo = await fetchPlaybackInfo({
         accessToken: token,
+        audioAdaptiveBitrateStreaming,
         audioQuality: streamingWifiAudioQuality,
         clientId,
         mediaProduct,
+        playerType,
         prefetch: false,
         streamingSessionId,
       });
@@ -102,9 +119,12 @@ async function _setNext(
     }
   }
 
+  const mimeType = playbackInfo.manifestMimeType;
+
   playerState.preloadPlayer = await getAppropriatePlayer(
     mediaProduct.productType,
     'trackId' in playbackInfo ? playbackInfo.audioQuality : undefined,
+    mimeType,
   );
 
   const streamInfo = parseManifest(playbackInfo);
@@ -122,30 +142,35 @@ async function _setNext(
       'videoId' in playbackInfo ? playbackInfo.videoId : playbackInfo.trackId,
     ),
     actualQuality: streamInfo.quality,
-    isPostPaywall: playbackInfo.assetPresentation === 'FULL',
-    // Euw...
+    extras: mediaProduct.extras,
+    isPostPaywall: getIsPostPaywall(
+      playbackInfo.assetPresentation,
+      mediaProduct,
+    ),
     playbackSessionId: streamingSessionId,
-    productType: mediaProduct.productType === 'track' ? 'TRACK' : 'VIDEO',
+    productType: PlayLog.mapProductTypeToPlayLogProductType(
+      mediaProduct.productType,
+    ),
     requestedProductId: mediaProduct.productId,
     sourceId: mediaProduct.sourceId,
     sourceType: mediaProduct.sourceType,
     startAssetPosition: 0,
     startTimestamp,
     streamingSessionId,
-  });
-
-  StreamingMetrics.commit({
-    events: [
-      StreamingMetrics.streamingSessionStart({ streamingSessionId }),
-      StreamingMetrics.playbackInfoFetch({ streamingSessionId }),
-    ],
   }).catch(console.error);
 
+  StreamingMetrics.commit([
+    StreamingMetrics.streamingSessionStart({ streamingSessionId }),
+    StreamingMetrics.playbackInfoFetch({ streamingSessionId }),
+  ]).catch(console.error);
+
   const { activePlayer } = playerState;
+  /* eslint-disable @typescript-eslint/prefer-optional-chain -- optional chain would make `undefined === undefined` true when both are nullish */
   const samePlayer =
     activePlayer &&
     playerState.preloadPlayer &&
     activePlayer.name === playerState.preloadPlayer.name;
+  /* eslint-enable @typescript-eslint/prefer-optional-chain */
 
   if (samePlayer) {
     await activePlayer.next({

@@ -1,15 +1,16 @@
 import {
+  type Credentials,
   IllegalArgumentError,
   RetryableError,
   TidalError,
 } from '@tidal-music/common';
 import { trueTime } from '@tidal-music/true-time';
 
-import { UnexpectedError, authErrorCodeMap } from '../errors';
-import * as fixtures from '../fixtures';
-import * as _storage from '../storage/storage';
-import * as _fetchHandling from '../utils/fetchHandling';
-import * as _utils from '../utils/utils';
+import { UnexpectedError, authErrorCodeMap } from '../errors/index.js';
+import * as fixtures from '../fixtures.js';
+import * as _storage from '../storage/storage.js';
+import * as _fetchHandling from '../utils/fetchHandling.js';
+import * as _utils from '../utils/utils.js';
 
 import {
   bus,
@@ -21,7 +22,7 @@ import {
   initializeLogin,
   logout,
   setCredentials,
-} from './auth';
+} from './auth.js';
 
 const storage = vi.mocked(_storage);
 const utils = vi.mocked(_utils);
@@ -38,6 +39,17 @@ const initConfig = {
   scopes: ['READ', 'WRITE'],
 };
 
+/**
+ * A pristine copy of the module, i.e. one where `init` has never been called.
+ * `logout` keeps the client configuration around, so tests that need a truly
+ * uninitialized module have to re-import it.
+ */
+const uninitializedAuth = async () => {
+  vi.resetModules();
+
+  return import('./auth.js');
+};
+
 const prepareFetchMock = {
   options: {
     body: 'baz',
@@ -49,26 +61,10 @@ const prepareFetchMock = {
   url: 'https://foo.baz',
 };
 
-describe.sequential('auth', () => {
-  beforeEach(() => {
-    vi.stubGlobal(
-      'CustomEvent',
-      vi.fn((type: string, options: { detail: { type: string } }) => {
-        return { detail: options.detail, type };
-      }),
-    );
-
-    vi.stubGlobal(
-      'dispatchEvent',
-      vi.fn(() => {}),
-    );
-
-    vi.stubGlobal(
-      'addEventListener',
-      vi.fn((_name, callback: () => void) => {
-        callback();
-      }),
-    );
+describe('auth', { concurrent: false }, () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   describe('init', () => {
@@ -142,6 +138,19 @@ describe.sequential('auth', () => {
       });
     });
 
+    it('inits with a custom crypto adapter', async () => {
+      vi.mocked(storage.loadCredentials).mockResolvedValue(undefined);
+
+      const cryptoAdapter = {
+        digest: vi.fn(),
+        getRandomValues: vi.fn(),
+      };
+
+      await init({ ...initConfig, crypto: cryptoAdapter });
+
+      expect(utils.setCryptoAdapter).toHaveBeenCalledWith(cryptoAdapter);
+    });
+
     it('inits the auth module with empty scopes', async () => {
       const trueTimeSpy = vi.spyOn(trueTime, 'synchronize').mockResolvedValue();
       vi.mocked(storage.loadCredentials).mockResolvedValue(undefined);
@@ -169,12 +178,10 @@ describe.sequential('auth', () => {
 
   describe('initializeLogin', () => {
     it("exits early when `init` hasn't been called before", async () => {
-      // clear local state
-      logout();
+      const auth = await uninitializedAuth();
 
       await expect(
-        async () =>
-          await initializeLogin({ redirectUri: 'https://foo.com/auth' }),
+        auth.initializeLogin({ redirectUri: 'https://foo.com/auth' }),
       ).rejects.toThrow(authErrorCodeMap.initError);
     });
 
@@ -224,6 +231,35 @@ describe.sequential('auth', () => {
 
       expect(response).toEqual(fixtures.deviceAuthorizationResponse);
       expect(fetchHandling.exponentialBackoff).toHaveBeenCalled();
+      expect(fetchHandling.prepareFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: expect.not.objectContaining({
+            app_approval: expect.anything(),
+          }),
+          path: 'oauth2/device_authorization',
+        }),
+      );
+    });
+
+    it('requests an app approval code when appApproval is set', async () => {
+      vi.mocked(fetchHandling.prepareFetch).mockReturnValue(prepareFetchMock);
+
+      vi.mocked(fetchHandling.exponentialBackoff).mockResolvedValue(
+        new Response(
+          JSON.stringify(fixtures.appApprovalDeviceAuthorizationResponse),
+        ),
+      );
+
+      await init(initConfig);
+      const response = await initializeDeviceLogin({ appApproval: true });
+
+      expect(response).toEqual(fixtures.appApprovalDeviceAuthorizationResponse);
+      expect(fetchHandling.prepareFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: expect.objectContaining({ app_approval: 'true' }),
+          path: 'oauth2/device_authorization',
+        }),
+      );
     });
 
     it('throws an error fetch returns one', async () => {
@@ -239,17 +275,16 @@ describe.sequential('auth', () => {
 
       await init(initConfig);
 
-      await expect(async () => await initializeDeviceLogin()).rejects.toThrow(
+      await expect(initializeDeviceLogin()).rejects.toThrow(
         authErrorCodeMap.unexpectedError,
       );
       expect(fetchHandling.exponentialBackoff).toHaveBeenCalled();
     });
 
     it('exits early when credentials are not present', async () => {
-      // clear local state
-      logout();
+      const auth = await uninitializedAuth();
 
-      await expect(async () => await initializeDeviceLogin()).rejects.toThrow(
+      await expect(auth.initializeDeviceLogin()).rejects.toThrow(
         authErrorCodeMap.initError,
       );
     });
@@ -257,12 +292,11 @@ describe.sequential('auth', () => {
 
   describe('finalizeLogin', () => {
     it("exits early when `init` hasn't been called before", async () => {
-      // clear local state
-      logout();
+      const auth = await uninitializedAuth();
 
-      await expect(
-        async () => await finalizeLogin('loginQueryResponse'),
-      ).rejects.toThrow(authErrorCodeMap.initError);
+      await expect(auth.finalizeLogin('loginQueryResponse')).rejects.toThrow(
+        authErrorCodeMap.initError,
+      );
     });
 
     it('exits early when no `code` is found in the responseQuery', async () => {
@@ -276,9 +310,9 @@ describe.sequential('auth', () => {
         scopes: ['READ', 'WRITE'],
       });
 
-      await expect(
-        async () => await finalizeLogin('loginQueryResponse'),
-      ).rejects.toThrow(authErrorCodeMap.authenticationError);
+      await expect(finalizeLogin('loginQueryResponse')).rejects.toThrow(
+        authErrorCodeMap.authenticationError,
+      );
     });
 
     it('requests an auth token and persists it', async () => {
@@ -296,6 +330,32 @@ describe.sequential('auth', () => {
       expect(result).toBeUndefined();
     });
 
+    it('does not send a clientUniqueKey when omitted', async () => {
+      // make sure `init` gets the correct values from storage
+      vi.mocked(storage.loadCredentials).mockResolvedValue(fixtures.storage);
+      vi.mocked(fetchHandling.handleTokenFetch).mockResolvedValue(
+        new Response(JSON.stringify(fixtures.userJsonResponse)), // oauth/token
+      );
+
+      await init({ ...initConfig, clientUniqueKey: undefined });
+
+      const result = await finalizeLogin('code=foobar');
+      expect(storage.saveCredentialsToStorage).toHaveBeenCalled();
+      expect(fetchHandling.handleTokenFetch).toHaveBeenCalledWith({
+        body: {
+          client_id: 'CLIENT_ID',
+          client_secret: 'CLIENT_SECRET',
+          code: 'foobar',
+          code_verifier: 'CODE_CHALLENGE',
+          grant_type: 'authorization_code',
+          redirect_uri: 'https://redirect.uri',
+          scope: 'READ WRITE',
+        },
+        credentials: { ...fixtures.storage, clientUniqueKey: undefined },
+      });
+      expect(result).toBeUndefined();
+    });
+
     it('requests an auth token and handles retryableError', async () => {
       // make sure `init` gets the correct values from storage
       vi.mocked(storage.loadCredentials).mockResolvedValue(fixtures.storage);
@@ -305,9 +365,9 @@ describe.sequential('auth', () => {
 
       await init(initConfig);
 
-      await expect(
-        async () => await finalizeLogin('code=foobar'),
-      ).rejects.toThrow(authErrorCodeMap.retryableError);
+      await expect(finalizeLogin('code=foobar')).rejects.toThrow(
+        authErrorCodeMap.retryableError,
+      );
       expect(fetchHandling.handleTokenFetch).toHaveBeenCalled();
     });
 
@@ -320,9 +380,9 @@ describe.sequential('auth', () => {
 
       await init(initConfig);
 
-      await expect(
-        async () => await finalizeLogin('code=foobar'),
-      ).rejects.toThrow(authErrorCodeMap.unexpectedError);
+      await expect(finalizeLogin('code=foobar')).rejects.toThrow(
+        authErrorCodeMap.unexpectedError,
+      );
       expect(fetchHandling.handleTokenFetch).toHaveBeenCalled();
     });
   });
@@ -430,7 +490,7 @@ describe.sequential('auth', () => {
       });
       await initializeDeviceLogin();
 
-      await expect(async () => await finalizeDeviceLogin()).rejects.toThrow(
+      await expect(finalizeDeviceLogin()).rejects.toThrow(
         authErrorCodeMap.retryableError,
       );
       expect(fetchSpy).toHaveBeenCalledTimes(2);
@@ -465,7 +525,7 @@ describe.sequential('auth', () => {
       await init(initConfig);
       await initializeDeviceLogin();
 
-      await expect(async () => await finalizeDeviceLogin()).rejects.toThrow(
+      await expect(finalizeDeviceLogin()).rejects.toThrow(
         authErrorCodeMap.tokenResponseError,
       );
       expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -476,44 +536,108 @@ describe.sequential('auth', () => {
 
       await init(initConfig);
 
-      await expect(async () => await finalizeDeviceLogin()).rejects.toThrow(
+      await expect(finalizeDeviceLogin()).rejects.toThrow(
         authErrorCodeMap.initError,
       );
     });
   });
 
   describe('logout', () => {
-    it('logs the user out by deleting credentials', async () => {
+    const loginAUser = async () => {
       vi.mocked(storage.loadCredentials).mockResolvedValue(undefined);
+      // make sure the token we set below isn't expired
+      vi.spyOn(trueTime, 'now').mockReturnValue(fixtures.expiresTimerMock);
 
       await init(initConfig);
+      await setCredentials({
+        accessToken: fixtures.storage.accessToken,
+        refreshToken: 'REFRESH_TOKEN',
+      });
+    };
+
+    it('logs the user out by deleting credentials', async () => {
+      await loginAUser();
 
       logout();
 
       expect(storage.deleteCredentials).toHaveBeenCalledWith(
         'CREDENTIALS_STORAGE_KEY',
       );
+      // the user token is gone, only the client configuration is left
+      await expect(getCredentials()).resolves.toEqual({
+        clientId: initConfig.clientId,
+        requestedScopes: initConfig.scopes,
+      });
+    });
+
+    it('keeps the module initialized, so `init` is not needed again', async () => {
+      await loginAUser();
+
+      logout();
+
       await expect(
-        async () => await initializeLogin({ redirectUri: 'test' }),
-      ).rejects.toThrow(authErrorCodeMap.initError);
+        initializeLogin({ redirectUri: 'https://foo.com/auth' }),
+      ).resolves.toContain('authorize');
+    });
+
+    // Regression test: `logout` used to announce `credentialsUpdated` while the
+    // credentials it was about to delete were still readable. A listener acting
+    // on that event got a live token back, and the follow up read it made based
+    // on it then threw `initError` — the `A0001` that @tidal-music/player
+    // logged on every logout.
+    it('has cleared the credentials by the time the bus is notified', async () => {
+      await loginAUser();
+
+      let listening = true;
+      const reads: Array<Credentials> = [];
+
+      // mirrors what @tidal-music/player does with the event: it reads the
+      // credentials, dispatches `authorized`/`unauthenticated` based on them,
+      // and the handler of that event reads the credentials once more
+      bus(() => {
+        if (!listening) {
+          return;
+        }
+
+        void getCredentials().then(async credentials => {
+          reads.push(credentials, await getCredentials());
+        });
+      });
+
+      logout();
+
+      await vi.waitFor(() => expect(reads).toHaveLength(2));
+      listening = false;
+
+      expect(reads.map(({ token }) => token)).toEqual([undefined, undefined]);
     });
   });
 
   describe('getAccessToken/refreshAccessToken/upgradeToken', () => {
-    it('should exit early if logout was called', async () => {
+    it('falls back to client credentials after a logout', async () => {
       vi.mocked(storage.loadCredentials).mockResolvedValue(undefined);
+      vi.spyOn(trueTime, 'now').mockReturnValue(fixtures.expiresTimerMock);
+      vi.mocked(fetchHandling.handleTokenFetch).mockResolvedValue(
+        new Response(JSON.stringify(fixtures.clientCredentialsJsonResponse)),
+      );
       vi.mocked(fetchHandling.prepareFetch).mockReturnValue(prepareFetchMock);
 
-      await init(initConfig);
+      await init({
+        ...initConfig,
+        clientSecret: 'CLIENT_SECRET',
+      });
 
       logout();
 
       expect(storage.deleteCredentials).toHaveBeenCalledWith(
         'CREDENTIALS_STORAGE_KEY',
       );
-      await expect(async () => await getCredentials()).rejects.toThrow(
-        authErrorCodeMap.initError,
-      );
+      // an anonymous token, not the user's one, and not an `initError`
+      expect(await getCredentials()).toEqual({
+        ...fixtures.storageClientCredentials.accessToken,
+        clientUniqueKey: 'CLIENT_UNIQUE_KEY',
+        requestedScopes: ['READ', 'WRITE'],
+      });
     });
 
     it('return accessToken only with basic credentials (no token)', async () => {
@@ -527,11 +651,40 @@ describe.sequential('auth', () => {
       });
     });
 
+    it('use client credentials to retrieve token, omitting passed scopes', async () => {
+      vi.spyOn(trueTime, 'now').mockReturnValue(fixtures.expiresTimerMock);
+      vi.mocked(fetchHandling.handleTokenFetch).mockResolvedValue(
+        new Response(JSON.stringify(fixtures.clientCredentialsJsonResponse)),
+      );
+      vi.mocked(fetchHandling.prepareFetch).mockReturnValue(prepareFetchMock);
+
+      await init({
+        ...initConfig,
+        clientSecret: 'CLIENT_SECRET',
+      });
+
+      expect(await getCredentials()).toEqual({
+        ...fixtures.storageClientCredentials.accessToken,
+        clientUniqueKey: 'CLIENT_UNIQUE_KEY',
+        requestedScopes: ['READ', 'WRITE'],
+      });
+      expect(fetchHandling.handleTokenFetch).toHaveBeenCalled();
+
+      // second time access token is requested, scope check needs to be skipped for client credentials
+      expect(await getCredentials()).toEqual({
+        ...fixtures.storageClientCredentials.accessToken,
+        clientUniqueKey: 'CLIENT_UNIQUE_KEY',
+        requestedScopes: ['READ', 'WRITE'],
+      });
+    });
+
     it('get the right token from storage and return it', async () => {
       vi.mocked(storage.loadCredentials).mockResolvedValue(fixtures.storage);
       vi.spyOn(trueTime, 'now').mockReturnValue(0); // make sure token isn't expired
       vi.mocked(fetchHandling.prepareFetch).mockReturnValue(prepareFetchMock);
-      const dispatchSpy = vi.spyOn(globalThis, 'dispatchEvent');
+
+      const busListener = vi.fn();
+      bus(busListener);
 
       await init(initConfig);
 
@@ -540,13 +693,11 @@ describe.sequential('auth', () => {
       expect(accessToken).toEqual(fixtures.storage.accessToken);
       expect(fetchHandling.handleTokenFetch).not.toHaveBeenCalled();
 
-      // make sure bus contains the token
-      expect(dispatchSpy).toHaveBeenCalledWith({
+      expect(busListener).toHaveBeenCalledWith({
         detail: {
           payload: fixtures.storage.accessToken,
           type: 'CredentialsUpdatedMessage',
         },
-        type: 'authEventBus',
       });
     });
 
@@ -570,6 +721,131 @@ describe.sequential('auth', () => {
       expect(fetchHandling.handleTokenFetch).toHaveBeenCalled();
       expect(storage.saveCredentialsToStorage).toHaveBeenCalled();
       expect(accessToken).toEqual(fixtures.storage.accessToken);
+    });
+
+    // Regression test: `logout` keeps `state.credentials` around, so a refresh
+    // that was already in flight would happily write its user token back into
+    // memory and into the storage, silently logging the user in again.
+    it('drops a refreshed token that arrives after a logout', async () => {
+      vi.mocked(storage.loadCredentials).mockResolvedValue({
+        ...fixtures.storage,
+        accessToken: {
+          ...fixtures.storage.accessToken,
+          expires: 0,
+        },
+      });
+      vi.spyOn(trueTime, 'now').mockReturnValue(fixtures.expiresTimerMock);
+
+      let respond: (response: Response) => void = () => {};
+      vi.mocked(fetchHandling.handleTokenFetch).mockReturnValue(
+        new Promise<Response>(resolve => {
+          respond = resolve;
+        }),
+      );
+
+      await init(initConfig);
+      vi.mocked(storage.saveCredentialsToStorage).mockClear();
+
+      const refreshing = getCredentials();
+      logout();
+      respond(new Response(JSON.stringify(fixtures.userJsonResponse)));
+
+      await expect(refreshing).rejects.toThrow(authErrorCodeMap.initError);
+      expect(storage.saveCredentialsToStorage).not.toHaveBeenCalled();
+
+      // still logged out: the next call falls back to client credentials
+      // instead of handing out the user token that was in flight
+      vi.mocked(fetchHandling.handleTokenFetch).mockResolvedValue(
+        new Response(JSON.stringify(fixtures.clientCredentialsJsonResponse)),
+      );
+
+      expect(await getCredentials()).toEqual({
+        ...fixtures.storageClientCredentials.accessToken,
+        clientUniqueKey: 'CLIENT_UNIQUE_KEY',
+        requestedScopes: ['READ', 'WRITE'],
+      });
+    });
+
+    // The storage write is asynchronous while `logout` deletes synchronously,
+    // so a logout landing mid-write would otherwise leave the token we just
+    // wrote behind for the next `loadCredentials` to pick up.
+    it('undoes the storage write when a logout lands in the middle of it', async () => {
+      vi.mocked(storage.loadCredentials).mockResolvedValue({
+        ...fixtures.storage,
+        accessToken: {
+          ...fixtures.storage.accessToken,
+          expires: 0,
+        },
+      });
+      vi.spyOn(trueTime, 'now').mockReturnValue(fixtures.expiresTimerMock);
+      vi.mocked(fetchHandling.handleTokenFetch).mockResolvedValue(
+        new Response(JSON.stringify(fixtures.userJsonResponse)),
+      );
+
+      await init(initConfig);
+
+      let finishWrite: () => void = () => {};
+      vi.mocked(storage.saveCredentialsToStorage).mockReturnValue(
+        new Promise<void>(resolve => {
+          finishWrite = () => resolve();
+        }),
+      );
+      // `init` wrote too, and the wait below has to see the refresh's write
+      vi.mocked(storage.saveCredentialsToStorage).mockClear();
+      vi.mocked(storage.deleteCredentials).mockClear();
+
+      const refreshing = getCredentials();
+      await vi.waitFor(() =>
+        expect(storage.saveCredentialsToStorage).toHaveBeenCalled(),
+      );
+
+      logout();
+      finishWrite();
+
+      await expect(refreshing).rejects.toThrow(authErrorCodeMap.initError);
+      // once by `logout` itself, once to undo the write that raced it
+      expect(storage.deleteCredentials).toHaveBeenCalledTimes(2);
+      expect(storage.deleteCredentials).toHaveBeenLastCalledWith(
+        initConfig.credentialsStorageKey,
+      );
+    });
+
+    // A logout removes the key material the write needs, so the storage error
+    // it causes has to reach the caller as the logout it really is.
+    it('reports a write that a logout made fail as a logout', async () => {
+      vi.mocked(storage.loadCredentials).mockResolvedValue({
+        ...fixtures.storage,
+        accessToken: {
+          ...fixtures.storage.accessToken,
+          expires: 0,
+        },
+      });
+      vi.spyOn(trueTime, 'now').mockReturnValue(fixtures.expiresTimerMock);
+      vi.mocked(fetchHandling.handleTokenFetch).mockResolvedValue(
+        new Response(JSON.stringify(fixtures.userJsonResponse)),
+      );
+
+      await init(initConfig);
+
+      let failWrite: () => void = () => {};
+      vi.mocked(storage.saveCredentialsToStorage).mockReturnValue(
+        new Promise<void>((_, reject) => {
+          failWrite = () =>
+            reject(new TidalError(authErrorCodeMap.storageError));
+        }),
+      );
+      // `init` wrote too, and the wait below has to see the refresh's write
+      vi.mocked(storage.saveCredentialsToStorage).mockClear();
+
+      const refreshing = getCredentials();
+      await vi.waitFor(() =>
+        expect(storage.saveCredentialsToStorage).toHaveBeenCalled(),
+      );
+
+      logout();
+      failWrite();
+
+      await expect(refreshing).rejects.toThrow(authErrorCodeMap.initError);
     });
 
     it('refresh token based on api subStatus', async () => {
@@ -634,7 +910,7 @@ describe.sequential('auth', () => {
 
       await init(initConfig);
 
-      await expect(async () => await getCredentials()).rejects.toThrow(
+      await expect(getCredentials()).rejects.toThrow(
         authErrorCodeMap.unexpectedError,
       );
       expect(fetchHandling.handleTokenFetch).toHaveBeenCalled();
@@ -655,7 +931,7 @@ describe.sequential('auth', () => {
 
       await init(initConfig);
 
-      await expect(async () => await getCredentials()).rejects.toThrow(
+      await expect(getCredentials()).rejects.toThrow(
         authErrorCodeMap.retryableError,
       );
       expect(fetchHandling.handleTokenFetch).toHaveBeenCalled();
@@ -697,18 +973,22 @@ describe.sequential('auth', () => {
 
       await init({
         clientId: 'NEW_CLIENT_ID',
-        clientSecret: 'CLIENT_SECRET',
+        clientSecret: 'NEW_CLIENT_SECRET',
         credentialsStorageKey: 'CREDENTIALS_STORAGE_KEY',
       });
 
       const accessToken = await getCredentials();
 
-      expect(fetchHandling.handleTokenFetch).toHaveBeenCalled();
       expect(storage.saveCredentialsToStorage).toHaveBeenCalled();
       expect(accessToken).toEqual({
         ...fixtures.storageClientCredentials.accessToken,
         clientId: 'NEW_CLIENT_ID',
       });
+
+      // second time should not call the fetch again, upgrade loop was stopped
+      await getCredentials();
+
+      expect(fetchHandling.handleTokenFetch).toHaveBeenCalledTimes(1);
     });
 
     it('token failed to upgrade, throw error', async () => {
@@ -723,7 +1003,7 @@ describe.sequential('auth', () => {
         clientId: 'NON_UPGRADABLE_CLIENT_ID',
       });
 
-      await expect(async () => await getCredentials()).rejects.toEqual(
+      await expect(getCredentials()).rejects.toEqual(
         new RetryableError(authErrorCodeMap.retryableError),
       );
       expect(fetchHandling.exponentialBackoff).toHaveBeenCalled();
@@ -739,7 +1019,7 @@ describe.sequential('auth', () => {
         scopes: ['READ', 'WRITE', 'DELETE'],
       });
 
-      await expect(async () => await getCredentials()).rejects.toEqual(
+      await expect(getCredentials()).rejects.toEqual(
         new IllegalArgumentError(authErrorCodeMap.illegalArgumentError),
       );
       expect(storage.deleteCredentials).toHaveBeenCalled();
@@ -761,7 +1041,7 @@ describe.sequential('auth', () => {
         credentialsStorageKey: 'CREDENTIALS_STORAGE_KEY',
       });
 
-      await expect(async () => await getCredentials()).rejects.toEqual(
+      await expect(getCredentials()).rejects.toEqual(
         new RetryableError(authErrorCodeMap.retryableError),
       );
       expect(fetchHandling.handleTokenFetch).toHaveBeenCalled();
@@ -786,13 +1066,8 @@ describe.sequential('auth', () => {
     });
 
     it('make sure parallel requests are halted', async () => {
-      vi.mocked(storage.loadCredentials).mockResolvedValue({
-        ...fixtures.storage,
-        accessToken: {
-          ...fixtures.storage.accessToken,
-          expires: 0,
-        },
-      });
+      // make sure init is called with no previous stored data
+      vi.mocked(storage.loadCredentials).mockResolvedValueOnce(undefined);
       vi.mocked(fetchHandling.handleTokenFetch)
         .mockResolvedValueOnce(
           new Response(JSON.stringify(fixtures.userJsonResponse)),
@@ -812,6 +1087,7 @@ describe.sequential('auth', () => {
 
       const accessToken = await Promise.all([
         getCredentials(),
+        getCredentials(),
         getCredentials('6001'),
         getCredentials(),
       ]);
@@ -820,6 +1096,7 @@ describe.sequential('auth', () => {
       expect(fetchHandling.handleTokenFetch).toHaveBeenCalledTimes(2);
       expect(storage.saveCredentialsToStorage).toHaveBeenCalled();
       expect(accessToken).toEqual([
+        fixtures.storage.accessToken,
         fixtures.storage.accessToken,
         fixtures.storage.accessToken,
         fixtures.storage.accessToken,
@@ -836,7 +1113,7 @@ describe.sequential('auth', () => {
         clientSecret: 'SECRET',
       });
 
-      await expect(async () => await getCredentials()).rejects.toEqual(
+      await expect(getCredentials()).rejects.toEqual(
         new RetryableError(authErrorCodeMap.retryableError),
       );
       expect(fetchHandling.handleTokenFetch).toHaveBeenCalled();
@@ -845,22 +1122,17 @@ describe.sequential('auth', () => {
   });
   describe('event bus', () => {
     it('calls the event bus on logout', async () => {
-      const dispatchSpy = vi.spyOn(globalThis, 'dispatchEvent');
-      const listenerSpy = vi.spyOn(globalThis, 'addEventListener');
       const consoleSpy = vi.spyOn(console, 'log');
 
       // eslint-disable-next-line no-console
-      const logger = (e: Event) => console.log(e);
+      const logger = (e: { detail: unknown }) => console.log(e);
       bus(logger);
 
       logout();
 
-      expect(dispatchSpy).toHaveBeenCalledWith({
+      expect(consoleSpy).toHaveBeenCalledWith({
         detail: { type: 'CredentialsUpdatedMessage' },
-        type: 'authEventBus',
       });
-      expect(listenerSpy).toHaveBeenCalledWith('authEventBus', logger);
-      expect(consoleSpy).toHaveBeenCalled();
     });
   });
 
@@ -883,8 +1155,7 @@ describe.sequential('auth', () => {
       });
 
       await expect(
-        async () =>
-          await setCredentials({ accessToken: fixtures.storage.accessToken }),
+        setCredentials({ accessToken: fixtures.storage.accessToken }),
       ).rejects.toEqual(
         new IllegalArgumentError(authErrorCodeMap.illegalArgumentError),
       );
@@ -896,25 +1167,22 @@ describe.sequential('auth', () => {
       });
 
       await expect(
-        async () =>
-          await setCredentials({
-            accessToken: {
-              ...fixtures.storage.accessToken,
-              token: undefined,
-            },
-          }),
+        setCredentials({
+          accessToken: {
+            ...fixtures.storage.accessToken,
+            token: undefined,
+          },
+        }),
       ).rejects.toEqual(
         new IllegalArgumentError(authErrorCodeMap.illegalArgumentError),
       );
     });
 
     it("throws because module wasn't init", async () => {
-      // clean up state
-      logout();
+      const auth = await uninitializedAuth();
 
       await expect(
-        async () =>
-          await setCredentials({ accessToken: fixtures.storage.accessToken }),
+        auth.setCredentials({ accessToken: fixtures.storage.accessToken }),
       ).rejects.toEqual(new TidalError(authErrorCodeMap.initError));
     });
   });
