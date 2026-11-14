@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    label {
+      display: block;
+      margin-bottom: 5px;
+    }
+  </style>
+</head>
+<body>
+  <form id="clientCredentialsForm">
+    <label>
+      <span>Client ID</span>
+      <input type="text" name="clientId" />
+    </label>
+    <label>
+      <span>Client Secret</span>
+      <input type="text" name="clientSecret" />
+    </label>
+    <label>
+      <span>Search term</span>
+      <input type="search" name="searchTerm" />
+    </label>
+    <label>
+      <span>Playlist ID (for pagination test)</span>
+      <input type="text" name="playlistId" value="58d7349f-e79a-4e3e-aaa4-2281556fa565" />
+    </label>
+    <button type="submit">Run Examples</button>
+  </form>
+
+  <ul id="results"></ul>
+
+  <script type="module" src="./api.js"></script>
+</body>
+</html>

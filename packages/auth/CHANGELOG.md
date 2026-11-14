@@ -1,0 +1,107 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.7.0] - 2026-10-09
+
+### Added
+
+- `initializeDeviceLogin({ appApproval: true })` requests a device login code
+  that the user approves in a TIDAL app instead of on `link.tidal.com`. The
+  response's `verificationUriComplete` then points to the approval page (e.g.
+  `https://tidal.com/approve/ABCDEFGH`), ready to show as a QR code. Without the
+  option the request is unchanged
+  ([#761](https://github.com/tidal-music/tidal-sdk-web/pull/761)).
+
+## [1.6.2] - 2026-08-20
+
+### Fixed
+
+- `logout()` now announces `credentialsUpdated` only once the session state has
+  been cleared, so a listener reacting to that event can no longer read the
+  credentials being logged out of. It also keeps the client configuration from
+  `init()` and drops only what belongs to the logged-in user, so
+  `getCredentials()` falls back to client credentials instead of throwing
+  `initError`, and callers no longer have to re-run `init()` after a logout
+  ([#718](https://github.com/tidal-music/tidal-sdk-web/pull/718)).
+- A token request that was already in flight when `logout()` ran can no longer
+  bring the session back to life, in memory or in secure storage. The state
+  carries a `sessionId` that `logout()` bumps, and a token response whose id no
+  longer matches is rejected with `initError`; a storage write that a logout
+  races is undone rather than left behind for the next `loadCredentials()`
+  ([#719](https://github.com/tidal-music/tidal-sdk-web/pull/719)). Note that the
+  undo is only synchronous on the default encrypted-`localStorage` backend. A
+  custom `StorageAdapter`'s `remove()` is dispatched without being awaited, so
+  with one installed the removal can still be outrun by an immediate `init()`,
+  or interrupted by a shutdown.
+
+## [1.6.1] - 2026-05-13
+
+### Fixed
+
+- Published `.d.ts` files now use explicit `.js` extensions on relative imports so the types resolve correctly under TypeScript's `"moduleResolution": "NodeNext"`/`"Node16"` ([#633](https://github.com/tidal-music/tidal-sdk-web/issues/633)).
+- Reordered the `package.json` `"exports"` so the `"types"` condition precedes `"import"`, ensuring TypeScript resolves types via the primary condition rather than a fallback (TS#50762).
+- Removed an accidental `@tidal-music/auth` self-dependency from the published `package.json`.
+
+## [1.6.0] - 2026-03-26
+
+### Added
+
+- Optional `CryptoAdapter` interface, allowing custom crypto implementations without polyfilling `globalThis.crypto`
+- `crypto` option in `init()` to inject a custom crypto adapter
+
+### Changed
+
+- Extract `sha256` and `generateOAuthCodeChallenge` crypto calls behind adapter abstraction
+
+## [1.5.0] - 2026-03-24
+
+### Added
+
+- Optional `StorageAdapter` interface, enabling custom credential storage (e.g. for Node.js / non-browser environments)
+- `storage` option in `init()` to inject a custom storage adapter
+
+### Changed
+
+- Replace DOM-based event bus (`CustomEvent` / `addEventListener`) with a plain callback array, removing the dependency on `globalThis` event APIs
+
+## [1.4.0] - 2025-08-13
+
+### Changed
+
+- Stop endless upgrade loop when client secret changed (#334)
+
+## [1.3.4] - 2025-03-12
+
+### Changed
+
+- Update docs link in Readme
+
+## [1.3.3] - 2024-08-19
+
+### Changed
+
+- Omit scope validity check for client credentials
+
+## [1.3.2] - 2024-08-19
+
+### Changed
+
+- Remove scope param from client credentials request
+
+## [1.3.1] - 2024-06-03
+
+### Changed
+
+- Improved examples [#116](https://github.com/tidal-music/tidal-sdk-web/pull/116), [#122](https://github.com/tidal-music/tidal-sdk-web/pull/122)
+- Fix sending empty clientUniqueKey [#130](https://github.com/tidal-music/tidal-sdk-web/pull/130)
+- Stop upgrading token if no clientSecret was present [#140](https://github.com/tidal-music/tidal-sdk-web/pull/140)
+
+## [1.3.0] - 2024-04-16
+
+### Changed
+
+- Use of the new TrueTime module

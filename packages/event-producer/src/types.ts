@@ -1,14 +1,14 @@
-import type { ConsentCategory } from './blockedConsentCategories';
+import type { ConsentCategory } from './blockedConsentCategories.js';
 
-export type * from './blockedConsentCategories';
-export type * from './config';
+export type * from './blockedConsentCategories.js';
+export type * from './config.js';
 
 export type AppInfo = {
   appName: string;
   appVersion: string;
 };
 
-export type EventHeaders = Record<string, string>;
+export type EventHeaders = Record<string, number | string>;
 
 /**
  * This is an incoming raw event.

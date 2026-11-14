@@ -1,30 +1,29 @@
-import type { EndedEvent } from '../api/event/ended';
-import { mediaProductTransition as mediaProductTransitionEvent } from '../api/event/media-product-transition';
-import * as Config from '../config';
-import { events } from '../event-bus';
-import { composePlaybackContext } from '../internal/helpers/compose-playback-context';
-import { streamingSessionStore } from '../internal/helpers/streaming-session-store';
-import { waitFor } from '../internal/helpers/wait-for';
+import type { EndedEvent } from '../api/event/ended.js';
+import { mediaProductTransition as mediaProductTransitionEvent } from '../api/event/media-product-transition.js';
+import * as Config from '../config.js';
+import { events } from '../event-bus.js';
+import { composePlaybackContext } from '../internal/helpers/compose-playback-context.js';
+import { createMediaElementErrorCircuitBreaker } from '../internal/helpers/media-element-error-circuit-breaker.js';
+import { streamingSessionStore } from '../internal/helpers/streaming-session-store.js';
+import { waitFor } from '../internal/helpers/wait-for.js';
 
 import {
   ensureVideoElementsMounted,
   mediaElementOne,
-  mediaElementTwo,
-} from './audio-context-store';
-import type { LoadPayload } from './basePlayer';
-import { BasePlayer } from './basePlayer';
+} from './audio-context-store.js';
+import type { LoadPayload } from './basePlayer.js';
+import { BasePlayer } from './basePlayer.js';
 
 // eslint-disable-next-line import/no-default-export
 export default class BrowserPlayer extends BasePlayer {
   #currentPlayer: HTMLVideoElement | undefined;
 
   #instanceOne: HTMLVideoElement;
-
-  #instanceTwo: HTMLVideoElement;
-
   #isReset = true;
 
   #librariesLoad: Promise<void> | undefined;
+
+  #mediaElementErrorCircuitBreaker = createMediaElementErrorCircuitBreaker();
 
   #mediaElementEventHandlers: {
     durationChangeHandler: EventListener;
@@ -38,6 +37,8 @@ export default class BrowserPlayer extends BasePlayer {
     timeUpdateHandler: EventListener;
     waitingHandler: EventListener;
   };
+
+  #preloadPlayer: HTMLVideoElement = document.createElement('video');
 
   #triedToPlay = false;
 
@@ -111,7 +112,7 @@ export default class BrowserPlayer extends BasePlayer {
     };
 
     const errorHandler = (e: Event) =>
-      console.error('HTMLMediaElement errored', e);
+      this.#mediaElementErrorCircuitBreaker.handleError(e);
 
     const seekedHandler = () => {
       if (this.mediaElement) {
@@ -126,7 +127,19 @@ export default class BrowserPlayer extends BasePlayer {
       errorHandler,
       pauseHandler: setNotPlaying,
       playHandler: setPlaying,
-      playingHandler: setPlaying,
+      playingHandler: () => {
+        // 'playing' (unlike 'play') only fires when the element actually
+        // starts advancing, so this is the strict "playback actually
+        // started" signal. Only the first event per session is reported.
+        // Sample the timestamp before setPlaying(): the playbackState setter
+        // synchronously notifies consumer listeners, whose work should not
+        // be included in the startup time.
+        if (this.mediaElement && !this.mediaElement.paused) {
+          this.mediaProductActuallyStarted(this.currentStreamingSessionId);
+        }
+
+        setPlaying();
+      },
       seekedHandler,
       stalledHandler: setStalled,
       timeUpdateHandler,
@@ -136,15 +149,8 @@ export default class BrowserPlayer extends BasePlayer {
     ensureVideoElementsMounted().then().catch(console.error);
 
     this.#instanceOne = mediaElementOne;
-    this.#instanceTwo = mediaElementTwo;
 
     this.currentPlayer = this.#instanceOne;
-  }
-
-  #getNextPlayerInstance() {
-    return [this.#instanceOne, this.#instanceTwo]
-      .filter(x => x !== this.#currentPlayer)
-      .pop();
   }
 
   #mediaElementEvents(mediaElement: HTMLMediaElement, eventsEnabled: boolean) {
@@ -206,6 +212,24 @@ export default class BrowserPlayer extends BasePlayer {
       this.#mediaElementEventHandlers.seekedHandler,
       { passive: true },
     );
+  }
+
+  get currentPlayer() {
+    return this.#currentPlayer;
+  }
+
+  set currentPlayer(newCurrentPlayer: HTMLVideoElement | undefined) {
+    this.debugLog('set currentPlayer', newCurrentPlayer);
+
+    if (this.#currentPlayer) {
+      this.#mediaElementEvents(this.#currentPlayer, false);
+      this.#currentPlayer.load();
+    }
+
+    if (newCurrentPlayer) {
+      this.#currentPlayer = newCurrentPlayer;
+      this.#mediaElementEvents(newCurrentPlayer, true);
+    }
   }
 
   getPosition() {
@@ -304,6 +328,10 @@ export default class BrowserPlayer extends BasePlayer {
     return Promise.resolve();
   }
 
+  get mediaElement(): HTMLMediaElement | null {
+    return this.currentPlayer ?? null;
+  }
+
   async next(payload: LoadPayload) {
     this.debugLog('next', payload);
 
@@ -318,7 +346,7 @@ export default class BrowserPlayer extends BasePlayer {
 
     const { mediaProduct, playbackInfo, streamInfo } = payload;
 
-    const preloadPlayer = this.#getNextPlayerInstance();
+    const preloadPlayer = this.#preloadPlayer;
 
     this.preloadedStreamingSessionId = streamInfo.streamingSessionId;
 
@@ -356,6 +384,7 @@ export default class BrowserPlayer extends BasePlayer {
         playbackContext,
       },
     );
+    this.#isReset = false;
   }
 
   pause() {
@@ -389,7 +418,6 @@ export default class BrowserPlayer extends BasePlayer {
     this.setStateToXIfNotYInZMs(1000, 'PLAYING', 'STALLED');
 
     if (this.currentPlayer) {
-      // eslint-disable-next-line no-console
       await this.currentPlayer.play().catch(console.error);
     }
   }
@@ -410,9 +438,20 @@ export default class BrowserPlayer extends BasePlayer {
     }
   }
 
+  get ready() {
+    return this.#librariesLoad;
+  }
+
   async reset(
     { keepPreload }: { keepPreload: boolean } = { keepPreload: false },
   ) {
+    // Always re-arm the media element error circuit breaker, even if the
+    // player is already in the reset state. Media element listeners stay
+    // attached across resets, so the breaker can trip while idle; without
+    // this, a subsequent load() (which calls reset()) would inherit the
+    // tripped breaker and silently suppress real errors on fresh content.
+    this.#mediaElementErrorCircuitBreaker.reset();
+
     if (this.#isReset) {
       return Promise.resolve();
     }
@@ -447,6 +486,7 @@ export default class BrowserPlayer extends BasePlayer {
     return Promise.resolve();
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-misused-promises
   seek(currentTime: number) {
     this.debugLog('seek', currentTime);
 
@@ -462,8 +502,7 @@ export default class BrowserPlayer extends BasePlayer {
     if ('fastSeek' in mediaEl) {
       mediaEl.fastSeek(seconds);
     } else {
-      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore
+      // @ts-expect-error it is (probably) a media element, just not with the fastSeek method
       mediaEl.currentTime = seconds;
     }
 
@@ -492,10 +531,8 @@ export default class BrowserPlayer extends BasePlayer {
       this.preloadedStreamingSessionId,
     );
 
-    const preloadPlayer = this.#getNextPlayerInstance();
-
-    if (preloadPlayer) {
-      this.currentPlayer = preloadPlayer;
+    if (this.#preloadPlayer.src && this.currentPlayer) {
+      this.currentPlayer.src = this.#preloadPlayer.src;
       this.currentStreamingSessionId = String(this.preloadedStreamingSessionId);
       this.preloadedStreamingSessionId = undefined;
 
@@ -532,38 +569,12 @@ export default class BrowserPlayer extends BasePlayer {
 
     this.cleanUpStoredPreloadInfo();
 
-    const preloadPlayer = this.#getNextPlayerInstance();
+    const preloadPlayer = this.#preloadPlayer;
 
     if (preloadPlayer) {
       preloadPlayer.src = '';
       preloadPlayer.load();
     }
-  }
-
-  get currentPlayer() {
-    return this.#currentPlayer;
-  }
-
-  set currentPlayer(newCurrentPlayer: HTMLVideoElement | undefined) {
-    this.debugLog('set currentPlayer', newCurrentPlayer);
-
-    if (this.#currentPlayer) {
-      this.#mediaElementEvents(this.#currentPlayer, false);
-      this.#currentPlayer.load();
-    }
-
-    if (newCurrentPlayer) {
-      this.#currentPlayer = newCurrentPlayer;
-      this.#mediaElementEvents(newCurrentPlayer, true);
-    }
-  }
-
-  get mediaElement(): HTMLMediaElement | null {
-    return this.currentPlayer ?? null;
-  }
-
-  get ready() {
-    return this.#librariesLoad;
   }
 
   get volume() {

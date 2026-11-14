@@ -1,5 +1,340 @@
-# v0.0.4
+# Changelog
 
-- Use the new cancelPreload method on NativePlayer to invalidate preloaded items.
-- Fix console error when trying to access localStorage in environments that does not support it. (Embed player in iframes)
-- Expose the new bitRate and sampleRate fields from the playback API in the PlaybackContext.
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.20.1] - 2026-08-20
+
+### Fixed
+
+- An auth module that has been logged out, or was never initialized, is now
+  treated as an unauthenticated user instead of surfacing a `console.error`'d
+  `A0001`. The credentials store dispatches `unauthenticated` rather than
+  letting the rejection escape, so event gathering is configured for a logged
+  out user instead of the handler aborting part way through. Only the "no
+  credentials at all" case is swallowed — a failed refresh or a network problem
+  still rejects
+  ([#718](https://github.com/tidal-music/tidal-sdk-web/pull/718)).
+
+## [0.20.0] - 2026-08-17
+
+### Changed
+
+- Upgraded the bundled shaka-player from 5.1.8 to 5.2.5, picking up upstream
+  improvements to gap jumping and stall breaking
+  ([#706](https://github.com/tidal-music/tidal-sdk-web/pull/706)).
+
+### Fixed
+
+- Play-log seek actions (`PLAYBACK_STOP`/`PLAYBACK_START`) are now only
+  reported for seeks initiated through the SDK's `seek()`. shaka performs
+  internal micro-seeks on the media element (e.g. the startup gap jump to the
+  first buffered range, stall-breaking skips), and these previously logged an
+  unpaired `PLAYBACK_START` action — with shaka 5.2 this happened on every
+  session for assets whose first buffered range starts slightly after 0
+  ([#706](https://github.com/tidal-music/tidal-sdk-web/pull/706)).
+- `maybeSwitchPlayerOnEnd` no longer throws a `TypeError` when a preload
+  player is missing (e.g. after a failed or absent preload during playlist
+  transitions); the player-switch registration is skipped instead
+  ([#702](https://github.com/tidal-music/tidal-sdk-web/pull/702)).
+
+## [0.19.0] - 2026-08-12
+
+### Changed
+
+- `playback_statistics` now reports `actualStartTimestamp` and
+  `idealStartTimestamp` as `null` instead of `0` when playback never actually
+  started (e.g. the session errored out before the first frame/sample).
+  Never-started sessions previously reported both timestamps as `0`, which
+  skewed startup time metrics towards zero whenever error rates rose.
+- Strict `actualStartTimestamp` semantics: the timestamp is now captured when
+  the media element actually starts producing output (first `playing` event,
+  or the native player's `active` state) instead of when `play()` is invoked.
+  Sessions that request playback but never produce audio (e.g. stuck
+  buffering, error mid-startup) now report `actualStartTimestamp: null`
+  instead of the `play()` invocation time, and startup time now includes the
+  initial buffering period.
+- Crossfade/gapless transitions now stamp the incoming track at fade start
+  instead of fade end: `idealStartTimestamp` is set when the transition is
+  triggered and `actualStartTimestamp` when the incoming element starts
+  playing. The outgoing track still reports until it stops at fade end, so
+  the two sessions intentionally overlap in wall-clock time.
+
+### Fixed
+
+- `playback_info_fetch` events now correctly report `endReason: 'ERROR'` and
+  the error code/message when fetching playback info fails. The error fields
+  were previously written in a separate reducer call that raced with the
+  final one, so the committed event always ended up with the default
+  `endReason: 'COMPLETE'` and errors were never reported. The error code now
+  also uses the structured `PlayerError` code (e.g. `NPBI0`, `A4033`) when
+  available instead of the free-form error message.
+- Event reducers now serialize their read-merge-write cycles. Two updates to
+  the same event racing in the same tick could previously drop one update's
+  fields (the same class of bug as the `playback_info_fetch` error reporting
+  fix above).
+- `playback_session` is now enqueued before the session's own
+  `playback_statistics`/`streaming_session_end` events when a session ends.
+  The event sender dispatches at most 10 events per batch, so the enqueue
+  order decides which events make the earliest batch; the consumption-relevant
+  play_log event should not risk being bumped to a later batch by its own
+  session's metrics events.
+
+## [0.18.4] - 2026-07-27
+
+### Fixed
+
+- Native player (desktop) no longer leaks a public `ended` event at gapless
+  track boundaries. Because the boundary was not marked a seamless transition,
+  apps reacting to `ended` could force-load the next queue item while the SDK
+  was already transitioning to the preloaded track, cutting the audible stream
+  and desyncing the play queue (`currentIndex` landing on `-1`). Completed
+  boundaries are now treated as seamless when a track is preloaded
+  ([#686](https://github.com/tidal-music/tidal-sdk-web/pull/686)).
+
+## [0.18.3] - 2026-06-23
+
+### Fixed
+
+- Streaming metrics timestamps are now scoped per streaming session in memory
+  instead of relying on shared browser Performance API marks. Quickly skipping
+  tracks could let one session clear or overwrite another session's marks, and
+  when the timestamp lookup threw inside the DRM license request/response
+  filters Shaka surfaced it as a spurious inner `1007` / outer `6007` error even
+  though the network request had succeeded. DRM license fetch metrics are now
+  captured at request time and recovered from `response.originalRequest`, so the
+  emitted `drm_license_fetch` events keep the correct request session id and
+  plausible request/response timestamps ([#661](https://github.com/tidal-music/tidal-sdk-web/pull/661)).
+
+## [0.18.2] - 2026-06-19
+
+### Changed
+
+- Track and video manifest requests now rely on `@tidal-music/api`'s built-in
+  retry mechanism instead of the player's own retry wrapper, avoiding nested
+  retries. Transient failures (HTTP 429/5xx, network errors and read timeouts)
+  are retried with exponential backoff and a 10s per-attempt read timeout.
+
+## [0.18.1] - 2026-05-13
+
+### Fixed
+
+- Published `.d.ts` files now use explicit `.js` extensions on relative imports so the types resolve correctly under TypeScript's `"moduleResolution": "NodeNext"`/`"Node16"` ([#633](https://github.com/tidal-music/tidal-sdk-web/issues/633)).
+- Reordered the `package.json` `"exports"` so the `"types"` condition precedes `"import"`, ensuring TypeScript resolves types via the primary condition rather than a fallback (TS#50762).
+
+## [0.18.0] - 2026-05-11
+
+### Added
+
+- Implemented crossfade in Shaka (#492)
+- Implemented (almost) gapless playback using dual media elements with short crossfade in Shaka (#492)
+
+### Changed
+
+- Shaka player updated to: 5.1.3
+
+## [0.17.0] - 2026-04-22
+
+### Changed
+
+- Support share code for track manifests (#610)
+- Shaka player updated to: 5.1.1
+
+## [0.16.0] - 2026-04-10
+
+### Changed
+
+- Use new `videoManifests` API for video playback instead of legacy playbackinfo endpoint
+- Shaka player updated to: 5.0.9
+
+## [0.15.0] - 2026-03-03
+
+### Changed
+
+- Better error handling for new `trackManifests` API (#536)
+- Fixed event listener leak in NativePlayer (#510)
+- Shaka player updated to: 4.16.19
+
+## [0.14.0] - 2026-02-13
+
+### Changed
+
+- Pipes through the preview reason on the track manifest
+- Removes duplicate types and points to single source for these things
+
+## [0.13.0] - 2026-02-10
+
+### Changed
+
+- Expose `setLegacyApiUrl` so both legacy and current API can be overridden
+
+## [0.12.0] - 2026-01-26
+
+### Changed
+
+- ABR streaming for audio (#480)
+- Use new `trackManifests` API for (Shaka) track playback (#465)
+- Shaka player updated to: 4.16.14 (patching TS-types removed, no longer needed)
+
+## [0.11.3] - 2026-01-14
+
+### Changed
+
+- Fix NativePlayer initialized with unsupported media formats (#470)
+- Shaka player updated to: 4.16.13
+
+## [0.11.2] - 2025-12-09
+
+### Changed
+
+- Fix NativePlayer incorrect seek issue (#452)
+
+## [0.11.1] - 2025-12-03
+
+### Changed
+
+- Preserve the player position when hard reloading (#447)
+
+## [0.11.0] - 2025-08-14
+
+### Changed
+
+- Remove support for 'demo' product type (#350)
+- Update getOutputDevices function type to return an array of OutputDevice (#351)
+
+## [0.10.2] - 2025-08-13
+
+### Fixed
+
+- Version bump only, as last version failed to release
+
+## [0.10.0] - 2025-08-13
+
+### Changed
+
+- Update to latest Shaka Player (4.15.9)
+
+## [0.9.1] - 2025-05-19
+
+### Changed
+
+- Update to latest Shaka Player again
+
+## [0.9.0] - 2025-05-09
+
+### Changed
+
+- Update to latest Shaka Player (#306)
+
+## [0.8.0] - 2025-04-25
+
+### Changed
+
+- Switch event tracking implementation (#91)
+
+## [0.7.1] - 2025-04-22
+
+### Fixed
+
+- Allow using `setEventUrl` again (#299)
+
+## [0.7.0] - 2025-04-15
+
+### Changed
+
+- Add `extras` to playback events (#295)
+
+## [0.6.2] - 2025-04-11
+
+### Changed
+
+- Add `play_log_open` events (#285)
+
+## [0.6.1] - 2025-04-11
+
+### Fixed
+
+- Avoid setting invalid Bearer token header (#289)
+
+## [0.6.0] - 2025-03-07
+
+### Fixed
+
+- Listen to correct Auth event in Player (#220)
+- Add handler for get next media product (#237)
+
+## [0.5.4] - 2024-10-10
+
+### Fixed
+
+- Avoid shaka error 3016 on Safari. #218
+
+## [0.5.3] - 2024-10-03
+
+### Fixed
+
+- Fix steaming-session-id linked to wrong playback info on some preloads. #214
+
+## [0.5.2] - 2024-10-02
+
+### Fixed
+
+- Handle products that are not preloadable in the shaka-player PreloadManager.
+
+
+## [0.5.1] - 2024-09-25
+
+### Changed
+
+- Rework reset state for native player to avoid incorrect states. (Could be the trigger for various "wrong track displayed" issues.)
+
+
+## [0.5.0] - 2024-09-18
+
+### Changed
+
+- Use Shaka Preload API for preparing the next track, instead of dual instances of shaka.
+- Removed mux.js dependency as shaka no longer requires that
+- Add authorization header to Widevine license request, to enable playback for Open API clients
+
+## [0.4.3] - 2024-09-10
+
+### Changed
+
+- Device restoration failure now throws an error to prevent further actions related to device change.
+
+## [0.4.2] - 2024-08-21
+
+### Changed
+
+- More solid fix for demo content in safari (#173)
+- Fix transitions from MAX in native player to LOW/HIGH in shaka player causing playback to stop (#177)
+- Fix some transitions between players causing reset to not work correctly leading to simultaneous playback (#177)
+
+## [0.4.1] - 2024-08-07
+
+### Changed
+
+- Instantiates Shaka with the correct config for FairPlay depending on initial item loaded
+
+## [0.4.0] - 2024-07-25
+
+### Changed
+
+- Removed support for MQA
+- Added support for playback of demo content in Safari
+
+## [0.3.0] - 2024-07-15
+
+### Changed
+
+- Added support for demo content
+- Added support for legacy browsers
+
+## [0.2.0] - 2024-04-16
+
+### Changed
+
+- Use of the new TrueTime module

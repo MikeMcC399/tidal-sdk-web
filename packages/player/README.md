@@ -1,10 +1,12 @@
 # TIDAL Player
 
+For the full specification, see the [Player specification](https://github.com/tidal-music/tidal-sdk/blob/main/Player.md).
+
 ## Usage
 
 `npm install @tidal-music/player` (or similar for other package managers)
 
-Then see [the docs](https://tidal-music.github.io/tidal-sdk-web/modules/_tidal_music_player.html) or the examples elsewhere in this repository.
+Then see [the docs](https://tidal-music.github.io/tidal-sdk-web/modules/_tidal-music_player.html) or the examples elsewhere in this repository.
 
 ## Development
 
@@ -16,6 +18,28 @@ The dist/ folder contains the latest built version of the code in src/.
 
 - [NPM/Node.js](https://nodejs.org/en/)
 
+### Local HTTPS for the demo / Cypress
+
+The dev server runs at `https://dev.tidal.com:5173`. Cert generation and trust
+are handled by [`vite-plugin-mkcert`](https://www.npmjs.com/package/vite-plugin-mkcert);
+nothing cert-related is checked in.
+
+One-time setup per machine:
+
+1. Add a hosts entry so `dev.tidal.com` resolves locally:
+
+   ```sh
+   echo "127.0.0.1 dev.tidal.com" | sudo tee -a /etc/hosts
+   ```
+
+2. Run `pnpm dev` once. The first run will prompt for `sudo` so mkcert can
+   install its local root CA into the system trust store. Subsequent runs are
+   silent.
+
+Behind a corporate proxy, prefix the command with `HTTPS_PROXY=...` so mkcert
+can download its binary. To wipe and re-trust:
+`mkcert -uninstall && rm -rf "$(mkcert -CAROOT)"`.
+
 ## Building
 
 Building is done with Vite.
@@ -25,6 +49,9 @@ Building is done with Vite.
 ## Testing
 
 `pnpm test`. You need a `.env` file containing `TEST_USER="base64string"` before running. base64string is base 64 encoded stringified JS object containing oAuthAccessToken, oAuthRefreshToken, oAuthExpirationDate and clientId.
+
+Cypress E2E specs target `https://dev.tidal.com:5173`, so the one-time setup
+above is also a prerequisite for `pnpm cypress:open` / `pnpm cypress:run`.
 
 ### Linking
 
@@ -36,8 +63,3 @@ To load TIDAL Player into a project locally without publishing to npm; using `pn
 4. Run `npm/yarn/pnpm install` in your destination project.
 
 !! Remove the entry in `"resolution"` and run `npm/yarn/pnpm install` again when you are done testing to have the NPM version of the package load instead.
-
-
-## Types in shaka
-
-Run the `patch-shaka` script to get TS working for shaka-player.

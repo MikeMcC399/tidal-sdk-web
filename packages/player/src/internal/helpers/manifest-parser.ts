@@ -1,7 +1,8 @@
-import type { NativePlayerStreamFormat } from '../../player/nativeInterface';
-import type { AudioQuality, Codec, VideoQuality } from '../types';
+import { mimeTypes } from '../../internal/constants.js';
+import type { NativePlayerStreamFormat } from '../../player/nativeInterface.js';
+import type { AudioQuality, Codec, VideoQuality } from '../types.js';
 
-import type { PlaybackInfo } from './playback-info-resolver';
+import type { PlaybackInfo } from './playback-info-resolver.js';
 
 type EmuManifest = Readonly<{
   mimeType: string;
@@ -29,31 +30,29 @@ function extractStreamFormat(
     switch (manifest.codecs) {
       case 'aac':
         return 'aac';
-      case 'mp4a.40.2':
-        return 'mp4a.40.2';
       case 'aac+':
         return 'aac+';
-      case 'mp4a.40.5':
-        return 'mp4a.40.5';
       case 'flac':
         return 'flac';
-      case 'mqa':
-        return 'mqa';
       case 'mp3':
         return 'mp3';
+      case 'mp4a.40.2':
+        return 'mp4a.40.2';
+      case 'mp4a.40.5':
+        return 'mp4a.40.5';
       default:
         break;
     }
   } else if (audioQuality) {
     switch (audioQuality) {
-      case 'LOW':
-        return 'mp4a.40.5';
-      case 'HIGH':
-        return 'mp4a.40.2';
-      case 'LOSSLESS':
       case 'HI_RES':
       case 'HI_RES_LOSSLESS':
+      case 'LOSSLESS':
         return 'flac';
+      case 'HIGH':
+        return 'mp4a.40.2';
+      case 'LOW':
+        return 'mp4a.40.5';
     }
   }
 
@@ -65,6 +64,7 @@ export type StreamInfo = {
   albumReplayGain?: number;
   bitDepth?: number;
   codec?: Codec;
+  duration?: number;
   expires: number;
   id: string;
   prefetched: boolean;
@@ -78,7 +78,6 @@ export type StreamInfo = {
     | 'mp3'
     | 'mp4a.40.2'
     | 'mp4a.40.5'
-    | 'mqa'
     | 'none';
   streamUrl: string;
   streamingSessionId: string;
@@ -87,27 +86,48 @@ export type StreamInfo = {
   type: 'track' | 'video';
 };
 
-function streamFormatToCodec(
+export function streamFormatToCodec(
   streamFormat: NativePlayerStreamFormat,
 ): Codec | undefined {
   switch (streamFormat) {
-    case 'mp3':
-      return 'mp3';
     case 'aac':
     case 'aac+':
     case 'mp4a.40.2':
     case 'mp4a.40.5':
       return 'aac';
     case 'flac':
-    case 'mqa':
       return streamFormat;
+    case 'mp3':
+      return 'mp3';
     default:
       return undefined;
   }
 }
 
+/**
+ * Find bit depth in a DASH manifest (from last int in id attribute of Representation, e.g. id="FLAC,44100,16")
+ * Returns undefined for ids without commas like "HEAACV1" or "AACLC".
+ */
+function dashFindBitDepth(manifest: string): number | undefined {
+  const repMatch = /<Representation[^>]*id="([^"]+)"/.exec(manifest);
+  if (repMatch) {
+    const id = repMatch[1];
+    // Only extract bit depth from comma-separated formats like "FLAC,44100,16"
+    if (!id?.includes(',')) {
+      return undefined;
+    }
+    const numbers = id.match(/\d+/g);
+    if (numbers && numbers.length > 0) {
+      return Number(numbers[numbers.length - 1]);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Find codec in a DASH manifest
+ */
 function dashFindCodec(manifest: string): Codec | undefined {
-  // Dash manifest
   const search = /codecs=(["'])?((?:.(?!\1|>))*.?)\1?/.exec(manifest);
 
   if (search === null) {
@@ -120,10 +140,6 @@ function dashFindCodec(manifest: string): Codec | undefined {
     return 'aac';
   }
 
-  if (codecs === 'mqa') {
-    return codecs;
-  }
-
   if (codecs === 'flac') {
     return codecs;
   }
@@ -131,6 +147,126 @@ function dashFindCodec(manifest: string): Codec | undefined {
   return undefined;
 }
 
+/**
+ * Convert duration format to seconds.
+ * (PT2M26.47S -> seconds)
+ */
+function parseDuration(duration: string): number {
+  const regex = /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?/;
+  const match = regex.exec(duration);
+
+  if (!match) {
+    throw new Error('Invalid duration format');
+  }
+
+  const hours = parseFloat(match[1] || '0'); // hours part, if present
+  const minutes = parseFloat(match[2] || '0'); // minutes part, if present
+  const seconds = parseFloat(match[3] || '0'); // seconds part, if present
+
+  // Convert the duration to total seconds
+  return hours * 3600 + minutes * 60 + seconds;
+}
+
+/**
+ * Find duration in a DASH manifest
+ */
+function dashFindDuration(manifest: string): number | undefined {
+  const regex = /mediaPresentationDuration="([^"]+)"/;
+  const match = regex.exec(manifest);
+
+  if (match) {
+    const duration = match[1];
+
+    if (duration) {
+      return parseDuration(duration);
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Find sample rate in a DASH manifest
+ */
+function dashFindSampleRate(manifest: string): number | undefined {
+  const regex = /<Representation[^>]*audioSamplingRate="(\d+)"/;
+  const match = regex.exec(manifest);
+
+  if (match) {
+    const rate = match[1];
+    if (rate) {
+      return Number(rate);
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Find bit depth in a TIDAL HLS manifest
+ */
+function hlsFindBitDepth(manifest: string): number | undefined {
+  // Look for X-COM-TIDAL-SAMPLE-DEPTH in EXT-X-DATERANGE or similar tags
+  const regex = /X-COM-TIDAL-SAMPLE-DEPTH=(\d+)/;
+  const match = regex.exec(manifest);
+  if (match) {
+    return Number(match[1]);
+  }
+  return undefined;
+}
+
+/**
+ * Find codec in a TIDAL HLS manifest
+ */
+function hlsFindCodec(manifest: string): string | undefined {
+  // Look for CODECS in EXT-X-STREAM-INF
+  const regex = /#EXT-X-STREAM-INF:[^\n]*CODECS="([^"]+)"/;
+  const match = regex.exec(manifest);
+  if (match) {
+    return match[1];
+  }
+  return undefined;
+}
+
+/**
+ * Find duration in a TIDAL HLS manifest (sum of all EXTINF durations)
+ */
+function hlsFindDuration(manifest: string): number | undefined {
+  // Sum all #EXTINF: durations
+  const regex = /#EXTINF:([\d.]+),/g;
+  let match;
+  let total = 0;
+  let found = false;
+  while ((match = regex.exec(manifest)) !== null) {
+    const duration = match[1];
+    if (!duration) {
+      continue;
+    }
+    total += parseFloat(duration);
+    found = true;
+  }
+  return found ? total : undefined;
+}
+
+/**
+ * Find sample rate in a TIDAL HLS manifest
+ */
+function hlsFindSampleRate(manifest: string): number | undefined {
+  // Look for X-COM-TIDAL-SAMPLE-RATE in EXT-X-DATERANGE or similar tags
+  const regex = /X-COM-TIDAL-SAMPLE-RATE=(\d+)/;
+  const match = regex.exec(manifest);
+  if (match) {
+    return Number(match[1]);
+  }
+  return undefined;
+}
+
+/**
+ * Parses playback info manifest into a stream info object.
+ *
+ * @param playbackInfo - The playback information containing the manifest.
+ * @returns The parsed stream information.
+ */
 export function parseManifest(playbackInfo: PlaybackInfo): StreamInfo {
   const { prefetched, streamingSessionId } = playbackInfo;
 
@@ -157,8 +293,8 @@ export function parseManifest(playbackInfo: PlaybackInfo): StreamInfo {
   };
 
   if (
-    playbackInfo.manifestMimeType === 'application/vnd.tidal.bts' ||
-    playbackInfo.manifestMimeType === 'application/vnd.tidal.emu'
+    playbackInfo.manifestMimeType === mimeTypes.BTS ||
+    playbackInfo.manifestMimeType === mimeTypes.EMU
   ) {
     const parsedManifest = parseJSONManifest(playbackInfo.manifest);
     const streamUrl = parsedManifest.urls[0]!;
@@ -181,14 +317,14 @@ export function parseManifest(playbackInfo: PlaybackInfo): StreamInfo {
       ...replayGains,
       bitDepth:
         'bitDepth' in playbackInfo
-          ? playbackInfo.bitDepth ?? undefined // API sends null, cast to undefined
+          ? (playbackInfo.bitDepth ?? undefined) // API sends null, cast to undefined
           : undefined,
       codec: streamFormatToCodec(streamFormat),
       prefetched,
       quality,
       sampleRate:
         'sampleRate' in playbackInfo
-          ? playbackInfo.sampleRate ?? undefined // API sends null, cast to undefined
+          ? (playbackInfo.sampleRate ?? undefined) // API sends null, cast to undefined
           : undefined,
       securityToken,
       streamFormat,
@@ -199,23 +335,52 @@ export function parseManifest(playbackInfo: PlaybackInfo): StreamInfo {
     };
   }
 
-  if (playbackInfo.manifestMimeType === 'application/dash+xml') {
+  if (playbackInfo.manifestMimeType === mimeTypes.DASH) {
     const streamUrl = `data:${playbackInfo.manifestMimeType};base64,${playbackInfo.manifest}`;
     const decodedManifest = atob(playbackInfo.manifest);
 
     return {
       ...replayGains,
-      bitDepth:
-        'bitDepth' in playbackInfo
-          ? playbackInfo.bitDepth ?? undefined // API sends null, cast to undefined
-          : undefined,
+      bitDepth: dashFindBitDepth(decodedManifest),
       codec: dashFindCodec(decodedManifest),
+      duration: dashFindDuration(decodedManifest),
       prefetched,
       quality,
-      sampleRate:
-        'sampleRate' in playbackInfo
-          ? playbackInfo.sampleRate ?? undefined // API sends null, cast to undefined
-          : undefined,
+      sampleRate: dashFindSampleRate(decodedManifest),
+      securityToken: playbackInfo.licenseSecurityToken,
+      streamUrl,
+      streamingSessionId,
+      ...mediaItem,
+      expires: playbackInfo.expires,
+    };
+  }
+
+  if (playbackInfo.manifestMimeType === mimeTypes.HLS) {
+    const streamUrl = `data:${playbackInfo.manifestMimeType};base64,${playbackInfo.manifest}`;
+
+    const decodedManifest = atob(playbackInfo.manifest);
+    const base64Part = decodedManifest.split('base64,')[1];
+    const firstLine = base64Part?.split('\n')[0];
+
+    if (!base64Part || !firstLine) {
+      throw new TypeError(
+        'Invalid HLS manifest format: missing base64-encoded variant manifest.',
+      );
+    }
+
+    const firstVariantManifest = atob(firstLine);
+    return {
+      ...replayGains,
+      bitDepth: hlsFindBitDepth(firstVariantManifest),
+      codec: streamFormatToCodec(
+        hlsFindCodec(
+          decodedManifest,
+        )?.toLowerCase() as NativePlayerStreamFormat,
+      ),
+      duration: hlsFindDuration(firstVariantManifest),
+      prefetched,
+      quality,
+      sampleRate: hlsFindSampleRate(firstVariantManifest),
       securityToken: playbackInfo.licenseSecurityToken,
       streamUrl,
       streamingSessionId,

@@ -4,12 +4,18 @@ import { login, print } from './helpers.js';
 
 await login();
 
-print('Loading 108506136');
+print('Loading video 159073354');
 await Player.load({
-  productId: '108506136',
-  productType: 'track',
-  sourceId: '4141352',
-  sourceType: 'ALBUM',
+  productId: '159073354',
+  productType: 'video',
+  sourceId: '159073354',
+  sourceType: 'VIDEO',
 });
-print('Playing 108506136');
+
+print('Playing video 159073354');
 await Player.play();
+
+// Seek near the end to make test faster (video is ~93 seconds).
+// Must happen after play() — Shaka v5 relies on timeupdate events to track
+// position changes, which only fire during active playback.
+await Player.seek(88);

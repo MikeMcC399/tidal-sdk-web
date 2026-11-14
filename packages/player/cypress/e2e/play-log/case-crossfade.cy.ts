@@ -1,0 +1,90 @@
+import { expect } from 'chai';
+import { INTERCEPT_OPTIONS, SDK_BATCH_INTERVAL } from '../../helpers.js';
+
+it('Crossfade Playback Test - 5s crossfade between tracks', () => {
+  cy.env(['TEST_USER']).then(({ TEST_USER: testUser }) => {
+    const credentials = JSON.parse(atob(testUser.substring(1, testUser.length - 1)));
+
+    cy.visit('/demo/test-case-gapless.html?crossfadeInMs=5000', {
+      onBeforeLoad (win) {
+        Object.assign(win, { __testUserCredentials: credentials });
+        win.indexedDB.deleteDatabase('EventProducerDB');
+
+        win.document.addEventListener('player-sdk:ended', cy.stub().as('playerSdkEnded'));
+        win.document.addEventListener('player-sdk:media-product-transition', cy.stub().as('playerSdkMediaProductTransition'));
+        win.document.addEventListener('player-sdk:preload-request', cy.stub().as('playerSdkPreloadRequest'));
+      }
+    });
+  });
+
+  cy.intercept(INTERCEPT_OPTIONS).as('playerSdkEventsRequest');
+
+  cy.get('@playerSdkMediaProductTransition', { timeout: 5000 }).should('be.called');
+
+  cy.get('@playerSdkPreloadRequest', { timeout: 3000 }).should('be.called');
+
+  // The demo seeks 12s before the end; with 5s crossfade, the transition
+  // event fires near the end of track 1 after preload has completed.
+  cy.get('@playerSdkMediaProductTransition', { timeout: 20000 }).should('be.calledTwice');
+
+  cy.wait(5000);
+
+  cy.wait('@playerSdkEventsRequest', {
+    timeout: SDK_BATCH_INTERVAL + 1000,
+  });
+
+  // The event sender dispatches at most 10 events per request, so the two
+  // playback_session events can end up in different batches. Aggregate all
+  // intercepted requests and retry until the second batch (sent one batch
+  // interval later) has arrived if needed.
+  // @ts-expect-error - Wrong type from Cypress
+  cy.get('@playerSdkEventsRequest.all', { timeout: SDK_BATCH_INTERVAL + 10000 }).should((interceptions) => {
+    const events = [];
+
+    for (const { request } of interceptions) {
+      const formData = new URLSearchParams(request.body);
+
+      for (const [key, value] of formData.entries()) {
+        if (key.includes('MessageBody')) {
+          const event = JSON.parse(decodeURIComponent(value));
+          events.push(event);
+        }
+      }
+    }
+
+    const playbackSessions = events.filter(({ name }) => name === 'playback_session');
+
+    expect(playbackSessions, `events seen: ${events.map(({ name }) => name).join(', ')}`).to.have.lengthOf(2);
+
+    const firstSession = playbackSessions[0];
+    const secondSession = playbackSessions[1];
+
+    expect(firstSession.payload).to.include({
+      startAssetPosition: 0,
+      actualProductId: '55391449',
+      sourceType: 'gapless-test',
+    });
+
+    expect(firstSession.payload.endAssetPosition).to.be.closeTo(147, 1);
+
+    expect(secondSession.payload).to.include({
+      startAssetPosition: 0,
+      actualProductId: '55391450',
+      sourceType: 'gapless-test',
+    });
+
+    // With 5s crossfade, track 2 starts playing 5s before the transition event fires
+    // (which happens at crossfade completion). The demo then waits 5s more before reset,
+    // so track 2 has been playing for ~10s total.
+    expect(secondSession.payload.endAssetPosition).to.be.closeTo(10, 2);
+
+    // Session timestamps: startTimestamp (track 2) is set when #completeTransition fires
+    // at the END of the crossfade, and endTimestamp (track 1) is set when its 'ended' event
+    // fires around the same time. The audio overlap is real (5s) but both timestamps land
+    // near the crossfade completion point, so the measured gap is near zero.
+    expect(firstSession.payload.endTimestamp).to.exist;
+    expect(secondSession.payload.startTimestamp).to.exist;
+    const gapBetweenTracks = secondSession.payload.startTimestamp - firstSession.payload.endTimestamp;
+    expect(Math.abs(gapBetweenTracks)).to.be.lessThan(500);
+  });
+});

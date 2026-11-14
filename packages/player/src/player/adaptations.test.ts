@@ -1,9 +1,18 @@
 import { expect } from 'chai';
+import type shaka from 'shaka-player';
 
-import * as StreamingMetrics from '../internal/event-tracking/streaming-metrics/index';
-import { trueTime } from '../internal/true-time';
+import type { PlaybackQualityChangedPayload } from '../api/event/playback-quality-changed.js';
+import type { MediaProduct, PlaybackContext } from '../api/interfaces.js';
+import { events } from '../event-bus.js';
+import * as StreamingMetrics from '../internal/event-tracking/streaming-metrics/index.js';
+import { streamingSessionStore } from '../internal/helpers/streaming-session-store.js';
+import { trueTime } from '../internal/true-time.js';
 
-import { saveAdaptation, shakaTrackToAdaptation } from './adaptations';
+import {
+  registerAdaptations,
+  saveAdaptation,
+  shakaTrackToAdaptation,
+} from './adaptations.js';
 
 await trueTime.synchronize();
 
@@ -26,7 +35,6 @@ describe('shakaTrackToAdaptation', () => {
   });
 });
 
-// eslint-disable-next-line vitest/valid-describe-callback
 describe('saveAdaptation', () => {
   it('saves the adaptation in streaming metrics', async () => {
     const activeShakaTrack = JSON.parse(
@@ -46,5 +54,200 @@ describe('saveAdaptation', () => {
     }
 
     expect(event.payload.adaptations[0]).to.deep.equal(adaptation);
+  });
+});
+
+describe('registerAdaptations', () => {
+  const testSessionId = 'adaptation-test-session';
+  const testMediaProduct: MediaProduct = {
+    productId: '12345',
+    productType: 'track',
+    sourceId: 'test-source',
+    sourceType: 'test',
+  };
+  const testPlaybackContext: PlaybackContext = {
+    actualAssetPresentation: 'FULL',
+    actualAudioMode: 'STEREO',
+    actualAudioQuality: 'LOSSLESS',
+    actualDuration: 200,
+    actualProductId: '12345',
+    actualStreamType: 'ON_DEMAND',
+    actualVideoQuality: null,
+    assetPosition: 0,
+    bandwidth: null,
+    bitDepth: 16,
+    codec: 'flac',
+    playbackSessionId: testSessionId,
+    sampleRate: 44100,
+  };
+
+  // Create a mock shaka player
+  function createMockShakaPlayer() {
+    const listeners: Record<string, Array<EventListener>> = {};
+    const activeTrack = {
+      active: true,
+      audioCodec: 'flac',
+      audioSamplingRate: 96000,
+      bandwidth: 2000000,
+      codecs: 'flac',
+      mimeType: 'audio/mp4',
+      originalAudioId: 'FLAC,96000,24',
+    } as shaka.extern.Track;
+
+    return {
+      addEventListener: (event: string, handler: EventListener) => {
+        if (!listeners[event]) {
+          listeners[event] = [];
+        }
+        listeners[event].push(handler);
+      },
+      getMediaElement: () => ({ currentTime: 10 }) as HTMLMediaElement,
+      getVariantTracks: () => [activeTrack],
+      removeEventListener: (event: string, handler: EventListener) => {
+        if (listeners[event]) {
+          listeners[event] = listeners[event].filter(h => h !== handler);
+        }
+      },
+      triggerEvent: (eventName: string, eventData?: Partial<Event>) => {
+        const event = new Event(eventName);
+        if (eventData) {
+          Object.assign(event, eventData);
+        }
+        listeners[eventName]?.forEach(handler => handler(event));
+      },
+    };
+  }
+
+  afterEach(() => {
+    streamingSessionStore.deleteSession(testSessionId);
+  });
+
+  it('dispatches playback-quality-changed event when player is active', done => {
+    const mockPlayer = createMockShakaPlayer();
+
+    streamingSessionStore.saveMediaProductTransition(testSessionId, {
+      mediaProduct: testMediaProduct,
+      playbackContext: testPlaybackContext,
+    });
+
+    const unregister = registerAdaptations(
+      mockPlayer as unknown as shaka.Player,
+      () => testSessionId,
+      () => true,
+    );
+
+    const handler = (e: Event) => {
+      events.removeEventListener('playback-quality-changed', handler);
+      const customEvent = e as CustomEvent<PlaybackQualityChangedPayload>;
+
+      expect(customEvent.detail.playbackContext.actualAudioQuality).to.equal(
+        'HI_RES_LOSSLESS',
+      );
+      expect(customEvent.detail.playbackContext.bandwidth).to.equal(2000000);
+      expect(customEvent.detail.playbackContext.sampleRate).to.equal(96000);
+
+      unregister();
+      done();
+    };
+
+    events.addEventListener('playback-quality-changed', handler);
+
+    mockPlayer.triggerEvent('adaptation', {
+      // @ts-expect-error: newTrack is not actually part of shaka.util.FakeEvent but we need to simulate it for testing purposes
+      newTrack: {
+        active: true,
+        audioCodec: 'flac',
+        audioSamplingRate: 96000,
+        bandwidth: 2000000,
+        originalAudioId: 'FLAC,96000,24',
+      } as shaka.extern.Track,
+    });
+  });
+
+  it('does NOT dispatch playback-quality-changed when player is inactive (preloading)', () => {
+    const mockPlayer = createMockShakaPlayer();
+    let qualityChangeFired = false;
+
+    streamingSessionStore.saveMediaProductTransition(testSessionId, {
+      mediaProduct: testMediaProduct,
+      playbackContext: testPlaybackContext,
+    });
+
+    const unregister = registerAdaptations(
+      mockPlayer as unknown as shaka.Player,
+      () => testSessionId,
+      () => false,
+    );
+
+    const handler = () => {
+      qualityChangeFired = true;
+    };
+
+    events.addEventListener('playback-quality-changed', handler);
+
+    mockPlayer.triggerEvent('adaptation', {
+      // @ts-expect-error: newTrack is not actually part of shaka.util.FakeEvent but we need to simulate it for testing purposes
+      newTrack: {
+        active: true,
+        audioCodec: 'flac',
+        audioSamplingRate: 96000,
+        bandwidth: 2000000,
+        originalAudioId: 'FLAC,96000,24',
+      } as shaka.extern.Track,
+    });
+
+    events.removeEventListener('playback-quality-changed', handler);
+    expect(qualityChangeFired).to.equal(false);
+
+    unregister();
+  });
+
+  it('updates streaming session store on adaptation event for active player', () => {
+    const mockPlayer = createMockShakaPlayer();
+
+    streamingSessionStore.saveMediaProductTransition(testSessionId, {
+      mediaProduct: testMediaProduct,
+      playbackContext: testPlaybackContext,
+    });
+
+    const unregister = registerAdaptations(
+      mockPlayer as unknown as shaka.Player,
+      () => testSessionId,
+      () => true,
+    );
+
+    mockPlayer.triggerEvent('adaptation', {
+      // @ts-expect-error: newTrack is not actually part of shaka.util.FakeEvent but we need to simulate it for testing purposes
+      newTrack: {
+        active: true,
+        audioCodec: 'flac',
+        audioSamplingRate: 96000,
+        bandwidth: 2000000,
+        originalAudioId: 'FLAC,96000,24',
+      } as shaka.extern.Track,
+    });
+
+    const updated =
+      streamingSessionStore.getMediaProductTransition(testSessionId);
+    expect(updated).to.not.equal(undefined);
+    expect(updated?.playbackContext.actualAudioQuality).to.equal(
+      'HI_RES_LOSSLESS',
+    );
+    expect(updated?.playbackContext.bandwidth).to.equal(2000000);
+
+    unregister();
+  });
+
+  it('removes event listeners on unregister', () => {
+    const mockPlayer = createMockShakaPlayer();
+
+    const unregister = registerAdaptations(
+      mockPlayer as unknown as shaka.Player,
+      () => undefined,
+      () => true,
+    );
+
+    expect(unregister).to.be.a('function');
+    unregister();
   });
 });

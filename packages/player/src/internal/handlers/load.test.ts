@@ -1,15 +1,14 @@
 import { expect } from 'chai';
 
-import * as Player from '../../index';
+import * as Player from '../../index.js';
 import {
-  credentialsProvider,
+  authAndEvents,
   getPreloadedStreamingSessionId,
-  waitFor,
-} from '../../test-helpers';
-
-Player.setCredentialsProvider(credentialsProvider);
+} from '../../test-helpers.js';
 
 describe('load', () => {
+  authAndEvents(before, after);
+
   it('re-uses a next for loading if it is the same media product', async () => {
     await Player.load(
       {
@@ -29,8 +28,6 @@ describe('load', () => {
       sourceId: 'next-call',
       sourceType: 'next-call',
     });
-
-    await waitFor(500);
 
     const preloadedStreamingSessionId = getPreloadedStreamingSessionId();
 
