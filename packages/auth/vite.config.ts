@@ -1,5 +1,6 @@
+import { type UserConfig } from 'vite';
 import dts from 'vite-plugin-dts';
-import { type UserConfig, defineConfig } from 'vitest/config';
+import { defineConfig } from 'vitest/config';
 
 export default defineConfig(({ command }) => {
   // needed for demo cors
@@ -12,7 +13,7 @@ export default defineConfig(({ command }) => {
               '/api/': {
                 changeOrigin: true,
                 rewrite: path => path.replace(/^\/api/, ''),
-                target: 'https://openapi.tidal.com/',
+                target: 'https://openapi.tidal.com/v2/',
               },
             },
           },
@@ -29,10 +30,11 @@ export default defineConfig(({ command }) => {
       minify: false,
       sourcemap: true,
     },
-    plugins: [dts({ rollupTypes: true, tsconfigPath: 'tsconfig.build.json' })],
+    plugins: [dts({ bundleTypes: false, tsconfigPath: 'tsconfig.build.json' })],
     test: {
       coverage: {
         exclude: ['examples/**'],
+        provider: 'v8',
         reportOnFailure: true,
         reporter: process.env.CI ? ['json', 'json-summary'] : ['html'],
         thresholds: {

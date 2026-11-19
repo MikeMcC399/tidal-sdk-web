@@ -3,9 +3,10 @@ import type {
   AudioMode,
   AudioQuality,
   Codec,
+  PreviewReason,
   StreamType,
   VideoQuality,
-} from '../internal/types';
+} from '../internal/types.js';
 
 /**
  * Contains playback related information for active media product.
@@ -19,10 +20,12 @@ export type PlaybackContext = {
   actualStreamType: StreamType | null;
   actualVideoQuality: VideoQuality | null;
   assetPosition: number;
-  bitDepth: null | number;
+  bandwidth: number | null; // TODO: add to spec
+  bitDepth: number | null;
   codec: Codec | null;
   playbackSessionId: string;
-  sampleRate: null | number;
+  previewReason?: PreviewReason;
+  sampleRate: number | null;
 };
 
 /**
@@ -47,20 +50,24 @@ export type PlaybackContext = {
  */
 export type PlaybackState = 'IDLE' | 'NOT_PLAYING' | 'PLAYING' | 'STALLED';
 export type LoudnessNormalizationMode = 'ALBUM' | 'NONE' | 'TRACK';
-export type { AudioQuality } from '../internal/types';
+export type { AudioQuality } from '../internal/types.js';
 
 /**
  * Contains information about a TIDAL media product.
  */
 export type MediaProduct = {
+  /** Optional extra attributes of the media product. Passed through to corresponding PlayLog event */
+  extras?: Record<string, unknown>;
   /** The id of the product to play */
   productId: string;
   /** The type of the product to play */
   productType: 'track' | 'video';
   /** Optional client-set reference id to handle duplicated in a play queue implementation */
   referenceId?: string;
-  /** The id of the source to playing, passed along for event tracking */
+  /** Share code that grants access to UNLISTED resources */
+  shareCode?: string;
+  /** The id of the source to play, passed along for event tracking */
   sourceId: string;
-  /** The type of the source to playing, passed along for event tracking */
+  /** The type of the source to play, passed along for event tracking */
   sourceType: string;
 };

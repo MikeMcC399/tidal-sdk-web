@@ -1,12 +1,12 @@
 export type NativeMediaItem = {
-  album: null | string | undefined;
+  album: string | null | undefined;
   artist: string;
   duration: number;
   id: number | string;
-  imageUrl: null | string | undefined;
+  imageUrl: string | null | undefined;
   title: string;
   type: 'track' | 'video';
-  url: null | string | undefined;
+  url: string | null | undefined;
 };
 
 export type NativePlaybackInterfaceDelegate = {
@@ -41,13 +41,12 @@ export type NativePlayerComponentSupportedEvents =
   | 'mediaerror'
   | 'mediaformat'
   | 'mediamaxconnectionsreached'
-  | 'mediamqadecoderstate'
   | 'mediastate'
   | 'version';
 
 export type NativePlayerDeviceMode = 'exclusive' | 'shared';
 
-export type NativePlayerDeviceType = 'airplay' | 'default' | 'mqa';
+export type NativePlayerDeviceType = 'airplay' | 'default';
 
 export type NativePlayerComponentDeviceDescription = {
   controllableVolume: boolean;
@@ -63,7 +62,6 @@ export type NativePlayerStreamFormat =
   | 'mp3'
   | 'mp4a.40.2'
   | 'mp4a.40.5'
-  | 'mqa'
   | 'none';
 
 export type NativePlayerComponentInterface = {
@@ -72,8 +70,6 @@ export type NativePlayerComponentInterface = {
     listener: (...args: Array<any>) => void,
   ): void;
   cancelPreload(): void;
-  disableMQADecoder(): void;
-  enableMQADecoder(): void;
   listDevices(): void;
   load(
     url: string,
@@ -93,6 +89,10 @@ export type NativePlayerComponentInterface = {
   ): void;
   recover(url: string, encryptionKey?: string): void;
   releaseDevice(): void;
+  removeEventListener(
+    eventName: NativePlayerComponentSupportedEvents,
+    listener: (...args: Array<any>) => void,
+  ): void;
   seek(miliseconds: number): void;
   selectDevice(
     device: Partial<NativePlayerComponentDeviceDescription>,

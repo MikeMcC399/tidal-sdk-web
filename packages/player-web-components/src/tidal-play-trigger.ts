@@ -1,6 +1,6 @@
 import * as Player from '@tidal-music/player';
 
-import { css } from './helpers';
+import { css } from './helpers.js';
 
 const customElementName = 'tidal-play-trigger';
 
@@ -11,8 +11,7 @@ class TidalPlayTrigger extends HTMLElement {
   constructor() {
     super();
 
-    this.#clickHandler = clickEvent => {
-      clickEvent.preventDefault();
+    this.#clickHandler = () => {
       this.#loadAndPlay().catch(console.error);
     };
 
@@ -20,7 +19,7 @@ class TidalPlayTrigger extends HTMLElement {
   }
 
   static get observedAttributes() {
-    return ['product-id', 'product-type'];
+    return ['product-id', 'product-type', 'share-code'];
   }
 
   async #loadAndPlay() {
@@ -34,14 +33,16 @@ class TidalPlayTrigger extends HTMLElement {
   }
 
   #loadIfNotLoaded() {
-    const currentProductIdInPlayer =
-      Player.getMediaProduct()?.productId ?? undefined;
+    const currentMediaProduct = Player.getMediaProduct();
+    const nextMediaProduct = this.mediaProduct;
 
     if (
-      this.mediaProduct &&
-      this.mediaProduct.productId !== currentProductIdInPlayer
+      nextMediaProduct &&
+      (currentMediaProduct?.productId !== nextMediaProduct.productId ||
+        currentMediaProduct?.productType !== nextMediaProduct.productType ||
+        currentMediaProduct?.shareCode !== nextMediaProduct.shareCode)
     ) {
-      return Player.load(this.mediaProduct, 0);
+      return Player.load(nextMediaProduct, 0);
     }
 
     return undefined;
@@ -90,10 +91,13 @@ class TidalPlayTrigger extends HTMLElement {
 
     const productType =
       this.getAttribute('product-type') === 'video' ? 'video' : 'track';
+    const rawShareCode = this.getAttribute('share-code');
+    const shareCode = rawShareCode?.trim() || undefined;
 
     return {
       productId,
       productType,
+      shareCode,
       sourceId: '',
       sourceType: '',
     };

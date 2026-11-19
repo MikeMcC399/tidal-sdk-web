@@ -1,18 +1,18 @@
 import type { CredentialsProvider } from '@tidal-music/common';
 import { trueTime } from '@tidal-music/true-time';
 
-import type { Config } from '../config';
-import * as monitor from '../monitor';
-import * as queue from '../queue';
-import type { EPEvent, SentEvent } from '../types';
-import { getEventHeaders } from '../utils/headerUtils';
-import { validateEvent } from '../utils/validateEvent';
-import { uuid } from '../uuid/uuid';
+import type { Config } from '../config.js';
+import * as monitor from '../monitor/index.js';
+import * as queue from '../queue/index.js';
+import type { EPEvent, SentEvent } from '../types.js';
+import { getEventHeaders } from '../utils/headerUtils.js';
+import { validateEvent } from '../utils/validateEvent.js';
+import { uuid } from '../uuid/uuid.js';
 
 type CreatePayloadParams = {
   event: SentEvent;
   id: string;
-  ts: string;
+  ts: number;
 };
 /**
  * Creates a payload to be sent to backend. The payload is the whole raw event with uuid
@@ -40,7 +40,7 @@ const createEvent = async ({
   event,
 }: SendEventParams): Promise<EPEvent> => {
   const id = uuid();
-  const sentTimestamp = trueTime.now().toString();
+  const sentTimestamp = trueTime.now();
   const headers = getEventHeaders({
     appInfo: config.appInfo,
     consentCategory: event.consentCategory,

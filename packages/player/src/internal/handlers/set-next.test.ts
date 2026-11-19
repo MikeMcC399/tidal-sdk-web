@@ -1,13 +1,13 @@
 import { expect } from 'chai';
 
-import * as Player from '../../index';
-import type { MediaProduct } from '../../index';
-import { waitFor } from '../../internal/helpers/wait-for';
-import { credentialsProvider, waitForEvent } from '../../test-helpers';
-
-Player.setCredentialsProvider(credentialsProvider);
+import * as Player from '../../index.js';
+import type { MediaProduct } from '../../index.js';
+import { waitFor } from '../../internal/helpers/wait-for.js';
+import { authAndEvents, waitForEvent } from '../../test-helpers.js';
 
 describe('nextHandler', () => {
+  authAndEvents(before, after);
+
   it('doesnt preload if no mediaProduct', async () => {
     await Player.load(
       {
@@ -64,6 +64,8 @@ describe('nextHandler', () => {
       playbackSessionId: firstSessionId,
     } = playbackContextOne;
 
+    await waitFor(500);
+
     await Player.setNext({
       productId: '141120674',
       productType: 'track',
@@ -113,6 +115,8 @@ describe('nextHandler', () => {
       actualProductId: firstProductId,
       playbackSessionId: firstSessionId,
     } = playbackContextOne;
+
+    await waitFor(500);
 
     await Player.setNext(testMediaProduct('2'));
 
@@ -168,6 +172,8 @@ describe('nextHandler', () => {
     );
 
     await Player.play();
+
+    await waitFor(500);
 
     await Player.setNext({
       productId: '154872415',

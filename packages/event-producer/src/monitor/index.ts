@@ -1,10 +1,10 @@
 import { trueTime } from '@tidal-music/true-time';
 
-import { getConfig } from '../config';
-import type { EPEvent } from '../types';
-import { getEventHeaders } from '../utils/headerUtils';
-import { eventsToSqsRequestParameters } from '../utils/sqsParamsConverter';
-import { uuid } from '../uuid/uuid';
+import { getConfig } from '../config.js';
+import type { EPEvent } from '../types.js';
+import { getEventHeaders } from '../utils/headerUtils.js';
+import { eventsToSqsRequestParameters } from '../utils/sqsParamsConverter.js';
+import { uuid } from '../uuid/uuid.js';
 
 type MonitoringInformation = {
   /**
@@ -65,7 +65,6 @@ export const sendMonitoringInfo = async () => {
     }
 
     const headers = new Headers({
-      Action: 'SendMessageBatch',
       'Content-Type': 'application/x-www-form-urlencoded',
     });
     const monitoringEvent: EPEvent = {
@@ -75,7 +74,7 @@ export const sendMonitoringInfo = async () => {
         consentCategory: 'NECESSARY',
         credentials: await config.credentialsProvider?.getCredentials(),
         platformData: config.platform,
-        sentTimestamp: trueTime.now().toString(),
+        sentTimestamp: trueTime.now(),
       }),
       id: uuid(),
       name: 'tep-tl-monitoring',
@@ -85,7 +84,7 @@ export const sendMonitoringInfo = async () => {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
     if (globalThis.__tepTlDebug?.debug) {
       // eslint-disable-next-line no-console
-      console.log('monitoringEvent sendt:', monitoringEvent);
+      console.log('monitoringEvent sent:', monitoringEvent);
     }
     const body = eventsToSqsRequestParameters([monitoringEvent]);
     fetch(config.tlPublicConsumerUri, {

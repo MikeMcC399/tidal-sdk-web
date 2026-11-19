@@ -1,21 +1,30 @@
-import type { MediaProduct } from '../../api/interfaces';
-import * as Config from '../../config';
-import { events } from '../../event-bus';
-import * as StreamingMetrics from '../../internal/event-tracking/streaming-metrics/index';
-import { generateGUID } from '../../internal/helpers/generate-guid';
-import { parseManifest } from '../../internal/helpers/manifest-parser';
-import { fetchPlaybackInfo } from '../../internal/helpers/playback-info-resolver';
-import type { PlaybackInfo } from '../../internal/helpers/playback-info-resolver';
-import { streamingSessionStore } from '../../internal/helpers/streaming-session-store';
-import { PlayerError, credentialsProviderStore } from '../../internal/index';
-import ConnectionHandler from '../../internal/services/connection-handler';
-import { getAppropriatePlayer, setActivePlayer } from '../../player/index';
-import { playerState } from '../../player/state';
-import { Pushkin } from '../services/pushkin';
-import { trueTime } from '../true-time';
+import type { MediaProduct } from '../../api/interfaces.js';
+import * as Config from '../../config.js';
+import { events } from '../../event-bus.js';
+import * as StreamingMetrics from '../../internal/event-tracking/streaming-metrics/index.js';
+import { generateGUID } from '../../internal/helpers/generate-guid.js';
+import { parseManifest } from '../../internal/helpers/manifest-parser.js';
+import { fetchPlaybackInfo } from '../../internal/helpers/playback-info-resolver.js';
+import type { PlaybackInfo } from '../../internal/helpers/playback-info-resolver.js';
+import { timestamps } from '../../internal/helpers/streaming-metrics-timestamps.js';
+import { streamingSessionStore } from '../../internal/helpers/streaming-session-store.js';
+import {
+  PlayerError,
+  credentialsProviderStore,
+  eventSenderStore,
+} from '../../internal/index.js';
+import ConnectionHandler from '../../internal/services/connection-handler.js';
+import {
+  getAppropriatePlayer,
+  predictPlayerType,
+  setActivePlayer,
+} from '../../player/index.js';
+import { playerState } from '../../player/state.js';
+import { Pushkin } from '../services/pushkin.js';
+import { trueTime } from '../true-time.js';
 
-import { reset } from './reset';
-import { latestNextCall } from './set-next';
+import { reset } from './reset.js';
+import { latestNextCall } from './set-next.js';
 
 /**
  * Will reset TIDAL Player from any current state and immediately make a
@@ -27,7 +36,7 @@ import { latestNextCall } from './set-next';
  * @param {number} assetPosition - At which time in seconds playback should start when later calling the play method, defaults to 0.
  * @param {boolean} prefetch - Wether or not this is a prefetch. This should be set to true if you need a media product transition to boot the UI.
  *
- * @see {@link import('../../api/event/playback-state-change').PlaybackStateChange}
+ * @see {@link PlaybackStateChange}
  *
  * @returns {Promise<void>} - On resolve, the requested media product is considered the active one and a MediaProductTransition will have been sent.
  */
@@ -36,6 +45,10 @@ export async function load(
   assetPosition = 0,
   prefetch = false,
 ) {
+  if (!eventSenderStore.hasEventSender()) {
+    throw new Error('Playback not allowed without an event sender.');
+  }
+
   await trueTime.synchronize();
 
   Pushkin.ensure().catch(console.error);
@@ -56,18 +69,14 @@ export async function load(
    * playbackinfo and player instead of loading it again.
    */
   if (
-    playerState.activePlayer?.nextItem &&
-    playerState.activePlayer.nextItem.mediaProduct.productId ===
-      mediaProduct.productId
+    playerState.activePlayer?.nextItem?.mediaProduct.productId ===
+    mediaProduct.productId
   ) {
     const player = playerState.activePlayer;
 
-    performance.mark(
+    timestamps.mark(
       'streaming_metrics:playback_statistics:idealStartTimestamp',
-      {
-        detail: playerState.preloadedStreamingSessionId,
-        startTime: trueTime.now(),
-      },
+      playerState.preloadedStreamingSessionId,
     );
 
     await player.reset({ keepPreload: true });
@@ -88,41 +97,46 @@ export async function load(
 
   const streamingSessionId = generateGUID();
 
-  StreamingMetrics.commit({
-    events: [
-      StreamingMetrics.streamingSessionStart({
-        sessionProductId: mediaProduct.productId,
-        sessionProductType:
-          mediaProduct.productType === 'track' ? 'TRACK' : 'VIDEO',
-        sessionType: 'PLAYBACK',
-        startReason: 'EXPLICIT',
-        streamingSessionId,
-        timestamp: trueTime.now(),
-      }),
-    ],
-  }).catch(console.error);
+  StreamingMetrics.commit([
+    StreamingMetrics.streamingSessionStart({
+      sessionProductId: mediaProduct.productId,
+      sessionProductType:
+        mediaProduct.productType === 'track' ? 'TRACK' : 'VIDEO',
+      sessionType: 'PLAYBACK',
+      startReason: 'EXPLICIT',
+      streamingSessionId,
+      timestamp: trueTime.now(),
+    }),
+  ]).catch(console.error);
 
-  performance.mark(
+  timestamps.mark(
     'streaming_metrics:playback_statistics:idealStartTimestamp',
-    {
-      detail: streamingSessionId,
-      startTime: trueTime.now(),
-    },
+    streamingSessionId,
   );
 
   const { clientId, token } =
     await credentialsProviderStore.credentialsProvider.getCredentials();
 
+  const audioAdaptiveBitrateStreaming = Config.get(
+    'audioAdaptiveBitrateStreaming',
+  );
   const streamingWifiAudioQuality = Config.get('streamingWifiAudioQuality');
 
   let playbackInfo: PlaybackInfo | null = null;
 
+  const playerType = predictPlayerType(
+    mediaProduct.productType,
+    streamingWifiAudioQuality,
+  );
+
   try {
     playbackInfo = await fetchPlaybackInfo({
       accessToken: token,
+      audioAdaptiveBitrateStreaming,
       audioQuality: streamingWifiAudioQuality,
       clientId,
       mediaProduct,
+      playerType,
       prefetch,
       streamingSessionId,
     });
@@ -131,7 +145,10 @@ export async function load(
       events.dispatchError(e);
     }
 
-    if (document.location.href.includes('localhost')) {
+    if (
+      document.location.hostname === 'localhost' ||
+      document.location.hostname === 'dev.tidal.com'
+    ) {
       console.error(e);
     }
   }
@@ -153,9 +170,18 @@ export async function load(
 
   const audioQuality =
     'trackId' in playbackInfo ? playbackInfo.audioQuality : undefined;
+
+  const mimeType = playbackInfo.manifestMimeType;
+
+  /**
+   * At the moment a config is provided by the client to pick the player based on quality.
+   * This is not ideal we need to pick the optimal player based on the current
+   * platform & the mimeType the players support not the quality mapping provided by the client.
+   */
   const player = await getAppropriatePlayer(
     mediaProduct.productType,
     audioQuality,
+    mimeType,
   );
 
   setActivePlayer(player);

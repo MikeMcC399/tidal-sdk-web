@@ -12,13 +12,11 @@
   },
   "license": "Apache-2.0",
   "module": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": {
-      "default": "./dist/index.js",
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
-    }
+    "types": "./dist/index.d.ts",
+    "import": "./dist/index.js",
+    "default": "./dist/index.js"
   },
   "scripts": {
     "prepare": "vite build",
@@ -30,20 +28,19 @@
     "lint:ci": "eslint . --quiet",
     "lint:fix": "pnpm run lint --fix",
     "preview": "vite preview",
-    "test": "vitest --sequence.concurrent",
+    "test": "vitest",
     "test:coverage": "pnpm run test --coverage",
     "test:ui": "pnpm run test:coverage --ui",
-    "typecheck": "tsc"
-  },
-  "dependencies": {
-    "@tidal-music/template": "workspace:*"
+    "typecheck": "tsc",
+    "check:types-resolution": "attw --pack . --ignore-rules=cjs-resolves-to-esm"
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "1.4.0",
-    "@vitest/ui": "1.4.0",
-    "typescript": "5.4.4",
-    "vite": "5.2.8",
-    "vite-plugin-dts": "3.8.1",
-    "vitest": "1.4.0"
+    "@vitest/coverage-v8": "5.0.5",
+    "@vitest/ui": "5.0.5",
+    "@typescript/native": "npm:typescript@7.0.2",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "vite": "8.3.5",
+    "vite-plugin-dts": "5.1.2",
+    "vitest": "5.0.5"
   }
 }

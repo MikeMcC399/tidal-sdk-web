@@ -1,4 +1,8 @@
-import { type ErrorOptions, TidalError } from '@tidal-music/common';
+import {
+  type ErrorOptions,
+  TidalError,
+  captureStackTrace,
+} from '@tidal-music/common';
 
 /**
  * Used to indicate that an access token could not be retrieved.
@@ -6,6 +10,8 @@ import { type ErrorOptions, TidalError } from '@tidal-music/common';
  * @extends TidalError
  */
 export class UnexpectedError extends TidalError {
+  override name = 'UnexpectedError';
+
   constructor(errorCode: string, options?: ErrorOptions) {
     super(errorCode, options);
 
@@ -13,10 +19,6 @@ export class UnexpectedError extends TidalError {
     Object.setPrototypeOf(this, UnexpectedError.prototype);
 
     // Maintains proper stack trace for where our error was thrown (only available on V8)
-    if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, UnexpectedError);
-    }
-
-    this.name = 'UnexpectedError';
+    captureStackTrace(this, UnexpectedError);
   }
 }

@@ -1,6 +1,6 @@
-import type { EPEvent } from '../types';
+import type { EPEvent } from '../types.js';
 
-import { db } from './db';
+import { db } from './db.js';
 
 let isInitialized = false;
 
@@ -37,6 +37,9 @@ export const initDB = async (): Promise<void> => {
 
 type MessageParams = MessageEvent<
   | {
+      action: 'clear';
+    }
+  | {
       action: 'init';
     }
   | {
@@ -45,26 +48,40 @@ type MessageParams = MessageEvent<
     }
 >;
 
-const connect = (event: MessageEvent) => {
-  const port = event.ports[0];
-  if (port) {
-    port.onmessage = async (message: MessageParams) => {
-      const { data } = message;
-      switch (data.action) {
-        case 'persist':
-          db.setItem('events', data.events).catch(console.error);
-          break;
-        case 'init': {
-          await initDB();
-          const events = await getStoredEvents();
-          port.postMessage({ action: 'initSuccess', events });
-          break;
-        }
+// eslint-disable-next-line no-restricted-globals
+self.onmessage = async (message: MessageParams) => {
+  const { data } = message;
+  switch (data.action) {
+    case 'clear': {
+      try {
+        await initDB();
+        await db.removeItem('events');
+        // eslint-disable-next-line no-restricted-globals
+        self.postMessage({ action: 'clearSuccess' });
+      } catch (error) {
+        console.error('Error clearing queue db:', error);
+        // Always reply so the main thread's clearEvents() settles.
+        // eslint-disable-next-line no-restricted-globals
+        self.postMessage({ action: 'clearFailed' });
       }
-    };
+      break;
+    }
+    case 'init': {
+      try {
+        await initDB();
+        const events = await getStoredEvents();
+        // eslint-disable-next-line no-restricted-globals
+        self.postMessage({ action: 'initSuccess', events });
+      } catch (error) {
+        console.error('Error initializing queue db:', error);
+        // Always reply so the main thread's initDB() settles.
+        // eslint-disable-next-line no-restricted-globals
+        self.postMessage({ action: 'initFailed' });
+      }
+      break;
+    }
+    case 'persist':
+      db.setItem('events', data.events).catch(console.error);
+      break;
   }
 };
-
-// @ts-expect-error - web worker type
-// eslint-disable-next-line no-restricted-globals
-self.onconnect = connect;

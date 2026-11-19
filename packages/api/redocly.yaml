@@ -1,0 +1,5 @@
+apis:
+  all:
+    root: ./bin/tidal-api-oas.json
+    x-openapi-ts:
+      output: ./src/allAPI.generated.ts

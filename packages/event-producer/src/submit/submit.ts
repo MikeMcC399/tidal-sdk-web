@@ -1,23 +1,21 @@
 import { IllegalArgumentError } from '@tidal-music/common';
 
-import type { Config } from '../config';
-import * as monitor from '../monitor';
-import { isOutage, setOutage } from '../outage';
-import * as queue from '../queue';
-import type { EPEvent } from '../types';
-import { eventsToSqsRequestParameters } from '../utils/sqsParamsConverter';
+import type { Config } from '../config.js';
+import * as monitor from '../monitor/index.js';
+import { isOutage, setOutage } from '../outage/index.js';
+import * as queue from '../queue/index.js';
+import type { EPEvent } from '../types.js';
+import { eventsToSqsRequestParameters } from '../utils/sqsParamsConverter.js';
+
+type SubmitEventsParams = { config: Config };
 
 /**
- * Takes the first 10 events from the queue and sends them to backend.
- * Successful events are then removed from the queue.
- * Unsuccessful events are kept in the queue for later retry.
- *
- * If the backend service is not available we trigger an outage.
+ * Takes the first 10 events from the queue and sends them to backend, then
+ * recurses until the queue is empty or a batch fails. See submitEvents.
  *
  * @param {SubmitEventsParams} params
  */
-type SubmitEventsParams = { config: Config };
-export const submitEvents = async ({
+const submitBatchLoop = async ({
   config,
 }: SubmitEventsParams): Promise<void> => {
   const eventsBatch = queue.getEventBatch();
@@ -25,7 +23,6 @@ export const submitEvents = async ({
     return Promise.resolve();
   }
   const headers = new Headers({
-    Action: 'SendMessageBatch',
     'Content-Type': 'application/x-www-form-urlencoded',
   });
   if (!config.credentialsProvider) {
@@ -40,16 +37,33 @@ export const submitEvents = async ({
   }
   const uri = accessToken ? config.tlConsumerUri : config.tlPublicConsumerUri;
   const body = eventsToSqsRequestParameters(eventsBatch);
-  const res = await fetch(uri, {
-    body,
-    headers,
-    method: 'post',
-  });
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+  let res: Response;
+  let respStr: string;
+  try {
+    res = await fetch(uri, {
+      body,
+      headers,
+      method: 'post',
+      signal: controller.signal,
+    });
+    // Reading the body can fail like the request itself (stream error, abort);
+    // treat both as a transport failure and keep the batch queued.
+    respStr = await res.text();
+  } catch {
+    clearTimeout(timeoutId);
+    setOutage(true);
+    return;
+  }
+  clearTimeout(timeoutId);
+
   if (res.ok) {
     if (isOutage()) {
       setOutage(false);
     }
-    const respStr = await res.text();
     const xml = new window.DOMParser().parseFromString(respStr, 'text/xml');
     const idsToRemove: Array<string> = [];
     xml
@@ -84,11 +98,14 @@ export const submitEvents = async ({
         }
       });
     queue.removeEvents(idsToRemove);
-    if (queue.getEvents().length > 0) {
-      return submitEvents({ config });
+    // Only continue while the batch made progress. A retryable per-entry error
+    // (SenderFault=false) keeps its event at the head of the queue; recursing
+    // on it would hammer the endpoint in a tight loop, so leave it for the
+    // next scheduled run instead.
+    if (idsToRemove.length > 0 && queue.getEvents().length > 0) {
+      return submitBatchLoop({ config });
     }
   } else {
-    const respStr = await res.text();
     console.error('Error sending event batch:', respStr);
     setOutage(true);
 
@@ -118,4 +135,33 @@ export const submitEvents = async ({
     }
   }
   return Promise.resolve();
+};
+
+/**
+ * The currently running submit loop, if any. Makes submitEvents single-flight:
+ * a scheduler tick or a flush() that arrives while a loop is already draining
+ * the queue awaits that loop instead of starting a second one, which would
+ * post the same batch twice.
+ */
+let inFlight: Promise<void> | null = null;
+
+/**
+ * Drains the queue in batches of 10, sending them to backend.
+ * Successful events are removed from the queue.
+ * Unsuccessful events are kept in the queue for later retry.
+ *
+ * If the backend service is not available we trigger an outage.
+ *
+ * Only one submit loop runs at a time; concurrent callers share the same promise.
+ *
+ * @param {SubmitEventsParams} params
+ */
+export const submitEvents = ({ config }: SubmitEventsParams): Promise<void> => {
+  if (inFlight) {
+    return inFlight;
+  }
+  inFlight = submitBatchLoop({ config }).finally(() => {
+    inFlight = null;
+  });
+  return inFlight;
 };

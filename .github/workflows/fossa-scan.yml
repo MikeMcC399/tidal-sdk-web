@@ -1,7 +1,6 @@
 name: FOSSA Scans
 
 on:
-  push:
   workflow_call:
 
 jobs:
@@ -9,17 +8,17 @@ jobs:
         runs-on: ubuntu-latest
         steps:
           - name: "Checkout Code"
-            uses: actions/checkout@v4
+            uses: actions/checkout@v7
 
           - name: "Run FOSSA Scan"
-            uses: fossas/fossa-action@v1.3.3
+            uses: fossas/fossa-action@29693cc50323968e039056be419b32989fc5880c # v2.0.0
             with:
               api-key: ${{secrets.FOSSAAPIKEY}}
               debug: true
 
           - name: "FOSSA Tests"
             id: fossa-tests
-            uses: fossas/fossa-action@v1.3.3
+            uses: fossas/fossa-action@29693cc50323968e039056be419b32989fc5880c # v2.0.0
             with:
               api-key: ${{secrets.FOSSAAPIKEY}}
               run-tests: true

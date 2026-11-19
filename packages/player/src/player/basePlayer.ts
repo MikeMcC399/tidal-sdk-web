@@ -1,28 +1,29 @@
-import { type EndReason, type EndedEvent, ended } from '../api/event/ended';
-import type { MediaProductTransitionPayload } from '../api/event/media-product-transition';
-import { playbackStateChange } from '../api/event/playback-state-change';
-import { preloadRequest } from '../api/event/preload-request';
-import type { MediaProduct, PlaybackState } from '../api/interfaces';
-import * as Config from '../config';
-import { events } from '../event-bus';
-import * as PlayLog from '../internal/event-tracking/play-log/index';
-import * as Playback from '../internal/event-tracking/playback/index';
-import * as StreamingMetrics from '../internal/event-tracking/streaming-metrics/index';
+import { type EndReason, type EndedEvent, ended } from '../api/event/ended.js';
+import type { MediaProductTransitionPayload } from '../api/event/media-product-transition.js';
+import { playbackStateChange } from '../api/event/playback-state-change.js';
+import { preloadRequest } from '../api/event/preload-request.js';
+import type { MediaProduct, PlaybackState } from '../api/interfaces.js';
+import * as Config from '../config.js';
+import { events } from '../event-bus.js';
+import * as PlayLog from '../internal/event-tracking/play-log/index.js';
+import * as StreamingMetrics from '../internal/event-tracking/streaming-metrics/index.js';
 import {
   type BasePayload as PlaybackStatisticsPayload,
   type StatisticsOutputType,
   transformOutputType,
-} from '../internal/event-tracking/streaming-metrics/playback-statistics';
-import { load } from '../internal/handlers/load';
-import type { StreamInfo } from '../internal/helpers/manifest-parser';
-import { normalizeVolume } from '../internal/helpers/normalize-volume';
-import type { PlaybackInfo } from '../internal/helpers/playback-info-resolver';
-import { streamingSessionStore } from '../internal/helpers/streaming-session-store';
-import { waitFor } from '../internal/helpers/wait-for';
-import type { OutputType } from '../internal/output-devices';
-import { trueTime } from '../internal/true-time';
+} from '../internal/event-tracking/streaming-metrics/playback-statistics.js';
+import { load } from '../internal/handlers/load.js';
+import { getIsPostPaywall } from '../internal/helpers/get-is-post-paywall.js';
+import type { StreamInfo } from '../internal/helpers/manifest-parser.js';
+import { normalizeVolume } from '../internal/helpers/normalize-volume.js';
+import type { PlaybackInfo } from '../internal/helpers/playback-info-resolver.js';
+import { timestamps } from '../internal/helpers/streaming-metrics-timestamps.js';
+import { streamingSessionStore } from '../internal/helpers/streaming-session-store.js';
+import { waitFor } from '../internal/helpers/wait-for.js';
+import type { OutputType } from '../internal/output-devices.js';
+import { trueTime } from '../internal/true-time.js';
 
-import { playerState } from './state';
+import { playerState } from './state.js';
 
 export type LoadPayload = {
   assetPosition: number;
@@ -30,6 +31,87 @@ export type LoadPayload = {
   playbackInfo: PlaybackInfo;
   streamInfo: StreamInfo;
 };
+
+const MAX_DEBUG_STRING_LENGTH = 500;
+
+function sanitizeDebugValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return sanitizeDebugString(value);
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  if (value instanceof Error) {
+    return {
+      message: value.message,
+      name: value.name,
+      stack: value.stack,
+    };
+  }
+
+  if (value instanceof Event || value instanceof Element) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(sanitizeDebugValue);
+  }
+
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, nestedValue] of Object.entries(
+    value as Record<string, unknown>,
+  )) {
+    if (isSensitiveDebugKey(key)) {
+      sanitized[key] =
+        typeof nestedValue === 'string'
+          ? `[redacted ${key}, ${nestedValue.length} chars]`
+          : `[redacted ${key}]`;
+      continue;
+    }
+
+    sanitized[key] = sanitizeDebugValue(nestedValue);
+  }
+
+  return sanitized;
+}
+
+// Sanitize a standalone string argument. Standalone strings can also carry
+// secrets -- e.g. callers that pass a stream URL or token directly as a
+// positional debugLog() arg -- so we apply the same defensive treatment as
+// when they appear under sensitive object keys: strip query strings off
+// URL-like values (where TIDAL stream/license URLs carry tokens), redact
+// data URLs, and truncate anything else that's unreasonably long.
+function sanitizeDebugString(value: string): string {
+  if (value.startsWith('data:')) {
+    return `[redacted data URL, ${value.length} chars]`;
+  }
+
+  if (value.startsWith('http://') || value.startsWith('https://')) {
+    const queryIndex = value.indexOf('?');
+    if (queryIndex !== -1) {
+      return `${value.slice(0, queryIndex)}?[redacted query, ${value.length - queryIndex - 1} chars]`;
+    }
+  }
+
+  if (value.length > MAX_DEBUG_STRING_LENGTH) {
+    return `${value.slice(0, MAX_DEBUG_STRING_LENGTH)}...[truncated ${value.length} chars]`;
+  }
+
+  return value;
+}
+
+// Keys whose values shouldn't be written to debug logs. The `token` substring
+// match catches all current and any future credential-bearing fields
+// (e.g. `securityToken`, `licenseSecurityToken`, `accessToken`) without us
+// having to keep an exhaustive enumeration in sync.
+function isSensitiveDebugKey(key: string): boolean {
+  if (key === 'manifest' || key === 'streamUrl') {
+    return true;
+  }
+  return /token/i.test(key);
+}
 
 function playbackStatisticsEndReason(
   endReason: EndReason,
@@ -61,8 +143,6 @@ export class BasePlayer {
 
   #startAssetPosition!: number;
 
-  #startedStreamInfos = new Map<string, boolean>();
-
   name: string | undefined;
 
   constructor() {
@@ -75,12 +155,25 @@ export class BasePlayer {
 
   // Implements
   #maybeDispatchPreloadRequest() {
+    const crossfadeInS = Config.get('crossfadeInMs') / 1000;
+
     if (
       this.duration &&
-      Math.abs(this.#currentTime - this.duration) <= 30 &&
-      // A false check, rather than undefined, ensures a media product transition hs been made.
+      // Check if the current time is within 15 seconds of when next item should start.
+      // (reduced from 30s to 15s to reduce risk of Safari background tab throttling)
+      Math.abs(this.#currentTime - this.duration + crossfadeInS) <= 15 &&
+      // A false check, rather than undefined, ensures a media product transition has been made.
       this.#hasEmittedPreloadRequest === false
     ) {
+      this.debugLog(
+        'maybeDispatchPreloadRequest',
+        {
+          crossfadeInS,
+          currentTime: this.#currentTime,
+          duration: this.duration,
+        },
+        Math.abs(this.#currentTime - this.duration + crossfadeInS),
+      );
       this.#hasEmittedPreloadRequest = true;
       events.dispatchEvent(preloadRequest());
     }
@@ -94,29 +187,42 @@ export class BasePlayer {
   #mediaProductEnded({
     endAssetPosition,
     endReason,
+    isSeamlessTransition = false,
     streamingSessionId,
   }: {
     endAssetPosition: number;
     endReason: EndReason;
+    /**
+     * `true` when the outgoing track is being finalized as part of a seamless
+     * transition to the next preloaded track -- both true gapless (zero overlap)
+     * and crossfade (overlapping fade). Suppresses the custom 'ended' event,
+     * the IDLE state change, and the next-product volume update so the app
+     * doesn't get notified that playback stopped while the next track is
+     * already playing.
+     */
+    isSeamlessTransition?: boolean;
     streamingSessionId: string;
   }) {
     this.debugLog('mediaProductEnded');
 
-    // If there is a preloaded item if should start right away.
-    if (playerState.preloadedStreamingSessionId) {
-      performance.mark(
+    // Only set idealStartTimestamp for non-seamless transitions. During a
+    // seamless transition (gapless or crossfade) the next track already
+    // started and the correct timestamp was already set at that time.
+    if (!isSeamlessTransition && playerState.preloadedStreamingSessionId) {
+      timestamps.mark(
         'streaming_metrics:playback_statistics:idealStartTimestamp',
-        {
-          detail: playerState.preloadedStreamingSessionId,
-          startTime: trueTime.now(),
-        },
+        playerState.preloadedStreamingSessionId,
       );
     }
 
     const mediaProductTransition =
       streamingSessionStore.getMediaProductTransition(streamingSessionId);
 
-    if (mediaProductTransition) {
+    // Only dispatch 'ended' for non-seamless transitions. During a seamless
+    // transition (gapless or crossfade) playback continues into the next
+    // track -- dispatching 'ended' would cause the app to incorrectly
+    // advance to the next track.
+    if (!isSeamlessTransition && mediaProductTransition) {
       events.dispatchEvent(
         ended(endReason, mediaProductTransition.mediaProduct),
       );
@@ -126,11 +232,8 @@ export class BasePlayer {
       endAssetPosition,
       endReason,
     });
-    this.reportPlaybackProgress(streamingSessionId);
 
     streamingSessionStore.deleteSession(streamingSessionId);
-
-    this.#startedStreamInfos.delete(streamingSessionId);
 
     // Check that ended SSI is still same as current before unsetting
     // yo prevent unsetting a started preload.
@@ -138,7 +241,12 @@ export class BasePlayer {
       this.currentStreamingSessionId = undefined;
     }
 
-    this.updateVolumeLevelForNextProduct();
+    // Only update volume for non-seamless transitions. During a seamless
+    // transition (gapless or crossfade) the next track is already playing
+    // with managed volume.
+    if (!isSeamlessTransition) {
+      this.updateVolumeLevelForNextProduct();
+    }
   }
 
   adjustedVolume(streamInfo: StreamInfo): number {
@@ -190,13 +298,38 @@ export class BasePlayer {
     }
   }
 
+  get currentMediaProduct() {
+    return (
+      streamingSessionStore.getMediaProductTransition(
+        this.currentStreamingSessionId,
+      )?.mediaProduct ?? null
+    );
+  }
+
+  set currentStreamingSessionId(ssi: string | undefined) {
+    this.#currentStreamingSessionId = ssi;
+  }
+
+  get currentStreamingSessionId() {
+    return this.#currentStreamingSessionId;
+  }
+
+  set currentTime(seconds: number) {
+    this.#currentTime = seconds;
+    this.#maybeDispatchPreloadRequest();
+  }
+
+  get currentTime() {
+    return this.#currentTime;
+  }
+
   // Implements
   debugLog(...args: Array<unknown>) {
     if (
-      document.location.href.includes('localhost') &&
+      (document.location.hostname === 'localhost' ||
+        document.location.hostname === 'dev.tidal.com') &&
       document.location.hash.includes('debug')
     ) {
-      // eslint-disable-next-line prefer-rest-params
       console.debug(
         `[%cPlayerSDK${
           this.name
@@ -223,7 +356,7 @@ export class BasePlayer {
             ]
           : []),
         'color:inherit',
-        ...args,
+        ...args.map(sanitizeDebugValue),
       );
     }
   }
@@ -237,6 +370,18 @@ export class BasePlayer {
       );
       this.#endedHandler = undefined;
     }
+  }
+
+  get duration() {
+    const mtp = streamingSessionStore.getMediaProductTransition(
+      this.currentStreamingSessionId,
+    );
+
+    if (mtp) {
+      return mtp.playbackContext.actualDuration;
+    }
+
+    return null;
   }
 
   /**
@@ -256,29 +401,32 @@ export class BasePlayer {
   ) {
     const endTimestamp = trueTime.now();
 
-    PlayLog.commit({
-      events: [
-        PlayLog.playbackSession({
-          endAssetPosition,
-          endTimestamp,
-          streamingSessionId,
-        }),
-      ],
-    }).catch(console.error);
-
-    StreamingMetrics.commit({
-      events: [
-        StreamingMetrics.playbackStatistics({
-          endReason: playbackStatisticsEndReason(endReason),
-          endTimestamp,
-          streamingSessionId,
-        }),
-        StreamingMetrics.streamingSessionEnd({
-          streamingSessionId,
-          timestamp: endTimestamp,
-        }),
-      ],
-    }).catch(console.error);
+    // Enqueue playback_session before the auxiliary streaming metrics: the
+    // event sender caps each dispatch batch at 10 events, so the relative
+    // enqueue order decides which events make the earliest batch. The
+    // play_log event is the consumption-relevant one and must not risk being
+    // bumped to a later batch by its own session's metrics events.
+    PlayLog.commit([
+      PlayLog.playbackSession({
+        endAssetPosition,
+        endTimestamp,
+        streamingSessionId,
+      }),
+    ])
+      .catch(console.error)
+      .finally(() => {
+        StreamingMetrics.commit([
+          StreamingMetrics.playbackStatistics({
+            endReason: playbackStatisticsEndReason(endReason),
+            endTimestamp,
+            streamingSessionId,
+          }),
+          StreamingMetrics.streamingSessionEnd({
+            streamingSessionId,
+            timestamp: endTimestamp,
+          }),
+        ]).catch(console.error);
+      });
   }
 
   eventTrackingStreamingStarted(streamingSessionId: string) {
@@ -286,48 +434,28 @@ export class BasePlayer {
       return;
     }
 
-    performance.mark(
-      'streaming_metrics:playback_statistics:actualStartTimestamp',
-      {
-        detail: streamingSessionId,
-        startTime: trueTime.now(),
-      },
-    );
-
-    performance.measure('idealStartTimestamp -> actualStartTimestamp', {
-      detail: streamingSessionId,
-      end: 'streaming_metrics:playback_statistics:actualStartTimestamp',
-      start: 'streaming_metrics:playback_statistics:idealStartTimestamp',
-    });
-
-    try {
-      // Start filling in playbackStatistics
-      StreamingMetrics.playbackStatistics({
-        actualStartTimestamp: trueTime.timestamp(
-          'streaming_metrics:playback_statistics:actualStartTimestamp',
-          streamingSessionId,
-        ),
-        idealStartTimestamp: trueTime.timestamp(
+    /*
+      Start filling in playbackStatistics. actualStartTimestamp is deliberately
+      not reported here: this method runs when playback is requested (play()),
+      not when audio actually starts. mediaProductActuallyStarted() reports it
+      from the media element's 'playing' signal -- or, for crossfade/gapless
+      transitions, at fade start when the incoming element begins playing --
+      so sessions that never produce audio keep actualStartTimestamp as null.
+    */
+    StreamingMetrics.playbackStatistics({
+      idealStartTimestamp:
+        timestamps.get(
           'streaming_metrics:playback_statistics:idealStartTimestamp',
           streamingSessionId,
-        ),
-        outputDevice: this.#outputDeviceType,
-        streamingSessionId,
-      });
-    } catch (e) {
-      console.error(
-        e,
-        'actualStartTimestamp or idealStartTimestamp is missing for this streaming session',
-      );
-    } finally {
-      performance.clearMarks(
-        'streaming_metrics:playback_statistics:actualStartTimestamp',
-      );
+        ) ?? null,
+      outputDevice: this.#outputDeviceType,
+      streamingSessionId,
+    }).catch(console.error);
 
-      performance.clearMarks(
-        'streaming_metrics:playback_statistics:idealStartTimestamp',
-      );
-    }
+    timestamps.clear(
+      'streaming_metrics:playback_statistics:idealStartTimestamp',
+      streamingSessionId,
+    );
 
     const mediaProductTransition =
       streamingSessionStore.getMediaProductTransition(streamingSessionId);
@@ -338,7 +466,7 @@ export class BasePlayer {
         started for the same streamingSessionId then we have somehow lost the media product
         transition which is an error.
       */
-      if (this.#startedStreamInfos.has(streamingSessionId)) {
+      if (streamingSessionStore.hasStartedStreamInfo(streamingSessionId)) {
         console.error(
           `A media product transition for streaming session #${streamingSessionId} has not been saved and could thus not be found for play log reporting.`,
         );
@@ -367,26 +495,56 @@ export class BasePlayer {
       actualQuality:
         playbackContext.actualAudioQuality ||
         playbackContext.actualVideoQuality,
-      isPostPaywall: playbackContext.actualAssetPresentation === 'FULL',
+      extras: mediaProduct.extras,
+      isPostPaywall: getIsPostPaywall(
+        playbackContext.actualAssetPresentation,
+        mediaProduct,
+      ),
       playbackSessionId: streamingSessionId,
-      productType: mediaProduct.productType === 'track' ? 'TRACK' : 'VIDEO',
+      productType: PlayLog.mapProductTypeToPlayLogProductType(
+        mediaProduct.productType,
+      ),
       requestedProductId: mediaProduct.productId,
       sourceId: mediaProduct.sourceId,
       sourceType: mediaProduct.sourceType,
       startAssetPosition: this.startAssetPosition,
       startTimestamp,
       streamingSessionId,
-    });
+    }).catch(console.error);
   }
 
-  finishCurrentMediaProduct(endReason: EndReason) {
+  get expired() {
+    const streamInfo = streamingSessionStore.getStreamInfo(
+      this.currentStreamingSessionId,
+    );
+
+    if (!streamInfo) {
+      return false;
+    }
+
+    // eslint-disable-next-line no-restricted-syntax
+    return streamInfo.expires <= Date.now();
+  }
+
+  finishCurrentMediaProduct(
+    endReason: EndReason,
+    isSeamlessTransition = false,
+  ) {
+    // A media product was loaded but never started.
+    if (!this.hasStarted()) {
+      return;
+    }
+
     const cssi = this.#currentStreamingSessionId;
     const hasNotBeenFinished = cssi
       ? streamingSessionStore.hasStreamInfo(cssi)
       : false;
 
     // Nothing is preloaded, player is now idle.
-    if (!this.preloadedStreamingSessionId) {
+    // CRITICAL: Skip this for seamless transitions (gapless / crossfade) -
+    // the next track is already playing and setting IDLE would dispatch a
+    // PlaybackStateChange event and corrupt app state.
+    if (!isSeamlessTransition && !this.preloadedStreamingSessionId) {
       this.playbackState = 'IDLE';
     }
 
@@ -394,6 +552,7 @@ export class BasePlayer {
       this.#mediaProductEnded({
         endAssetPosition: this.currentTime,
         endReason,
+        isSeamlessTransition,
         streamingSessionId: cssi,
       });
     }
@@ -415,22 +574,23 @@ export class BasePlayer {
   }
 
   hasNextItem() {
-    return (
-      this.preloadedStreamingSessionId &&
-      streamingSessionStore.hasMediaProductTransition(
-        this.preloadedStreamingSessionId,
-      )
-    );
+    return this.preloadedStreamingSessionId;
   }
 
   hasStarted() {
     return (
       this.currentStreamingSessionId &&
-      this.#startedStreamInfos.has(this.currentStreamingSessionId)
+      streamingSessionStore.hasStartedStreamInfo(this.currentStreamingSessionId)
     );
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars, no-unused-vars
+  get isActivePlayer() {
+    return (
+      playerState.activePlayer && this.name === playerState.activePlayer.name
+    );
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   load(_lp: LoadPayload, _transition: 'explicit' | 'implicit') {
     return Promise.resolve();
   }
@@ -446,11 +606,43 @@ export class BasePlayer {
     const prefetchedOrExpired = this.prefetched || this.expired;
 
     if (this.currentMediaProduct && prefetchedOrExpired) {
-      await this.hardReload(this.currentMediaProduct, 0);
+      // Preserve the current position (e.g., if user seeked before playing)
+      await this.hardReload(this.currentMediaProduct, this.currentTime);
       return true;
     }
 
     return false;
+  }
+
+  /**
+   * This method should be called when playback measurably starts producing
+   * output for a session: the media element's first 'playing' event or the
+   * equivalent player signal. This is stricter than mediaProductStarted,
+   * which runs when playback is requested.
+   *
+   * Only the first call per session takes effect, so later 'playing' events
+   * (resume from pause or stall) don't overwrite the reported value. Sessions
+   * that never reach this point keep actualStartTimestamp as null in
+   * playback_statistics.
+   *
+   * @param streamingSessionId
+   */
+  mediaProductActuallyStarted(streamingSessionId: string | undefined) {
+    if (
+      !streamingSessionId ||
+      streamingSessionStore.hasReportedActualStart(streamingSessionId)
+    ) {
+      return;
+    }
+
+    this.debugLog('mediaProductActuallyStarted');
+
+    streamingSessionStore.setReportedActualStart(streamingSessionId);
+
+    StreamingMetrics.playbackStatistics({
+      actualStartTimestamp: trueTime.now(),
+      streamingSessionId,
+    }).catch(console.error);
   }
 
   /**
@@ -463,7 +655,7 @@ export class BasePlayer {
   mediaProductStarted(streamingSessionId: string | undefined) {
     if (
       !streamingSessionId ||
-      this.#startedStreamInfos.has(streamingSessionId)
+      streamingSessionStore.hasStartedStreamInfo(streamingSessionId)
     ) {
       return;
     }
@@ -471,19 +663,40 @@ export class BasePlayer {
     this.debugLog('mediaProductStarted');
 
     this.eventTrackingStreamingStarted(streamingSessionId);
-    this.#startedStreamInfos.set(streamingSessionId, true);
+    streamingSessionStore.setStartedStreamInfo(streamingSessionId);
     this.updateVolumeLevel();
     this.#hasEmittedPreloadRequest = false;
 
-    this.preloadedStreamingSessionId = undefined;
+    // Only clear the preload bookkeeping if it still refers to the session
+    // that just started. A replacement preload registered while the
+    // transition settled must stay tracked, otherwise it can never be
+    // cancelled and plays unannounced at the next boundary.
+    if (this.preloadedStreamingSessionId === streamingSessionId) {
+      this.preloadedStreamingSessionId = undefined;
 
-    this.unloadPreloadedMediaProduct().catch(console.error);
+      this.unloadPreloadedMediaProduct().catch(console.error);
+    }
+
     this.attachPlaybackEngineEndedHandler();
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars, no-unused-vars
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   next(_lp: LoadPayload) {
     return Promise.resolve();
+  }
+
+  get nextItem() {
+    if (this.preloadedStreamingSessionId) {
+      return streamingSessionStore.getMediaProductTransition(
+        this.preloadedStreamingSessionId,
+      );
+    }
+
+    return undefined;
+  }
+
+  set outputDeviceType(ot: OutputType | undefined) {
+    this.#outputDeviceType = ot ? transformOutputType(ot) : undefined;
   }
 
   /**
@@ -527,40 +740,83 @@ export class BasePlayer {
     return Promise.resolve();
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars, no-unused-vars
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   playbackEngineEndedHandler(_e: EndedEvent) {
     return Promise.resolve();
   }
 
-  reportPlaybackProgress(streamingSessionId: string) {
-    const mediaProductTransition =
-      streamingSessionStore.getMediaProductTransition(streamingSessionId);
+  set playbackState(newPlaybackState: PlaybackState) {
+    const currentPlaybackState = this.#playbackState;
 
-    if (!mediaProductTransition) {
+    // Ignore dispatching playbackStateChange if the state doesn't change.
+    if (currentPlaybackState === newPlaybackState) {
       return;
     }
 
-    const { mediaProduct, playbackContext } = mediaProductTransition;
-
-    if (this.#currentStreamingSessionId) {
-      Playback.commit({
-        events: [
-          Playback.progress({
-            playback: {
-              durationMS: Math.floor(playbackContext.actualDuration * 1000),
-              id: mediaProduct.productId,
-              playedMS: Math.floor(this.currentTime * 1000),
-              source: {
-                id: mediaProduct.sourceId,
-                type: mediaProduct.sourceType,
-              },
-              type: mediaProduct.productType === 'track' ? 'TRACK' : 'VIDEO',
-            },
-            streamingSessionId: this.#currentStreamingSessionId,
-          }),
-        ],
-      }).catch(console.error);
+    if (!this.currentStreamingSessionId) {
+      return;
     }
+
+    const fromTo = (from: PlaybackState, to: PlaybackState) =>
+      currentPlaybackState === from && to === newPlaybackState;
+
+    switch (true) {
+      case fromTo('NOT_PLAYING', 'STALLED'):
+      case fromTo('IDLE', 'STALLED'):
+        return;
+      case fromTo('PLAYING', 'NOT_PLAYING'):
+      case fromTo('PLAYING', 'IDLE'): {
+        if (this.duration && this.currentTime < this.duration) {
+          PlayLog.playbackSessionAction(this.currentStreamingSessionId, {
+            actionType: 'PLAYBACK_STOP',
+            assetPosition: this.currentTime,
+            timestamp: trueTime.now(),
+          }).catch(console.error);
+        }
+        break;
+      }
+      case fromTo('IDLE', 'PLAYING'):
+      case fromTo('NOT_PLAYING', 'PLAYING'): {
+        if (this.currentTime !== this.startAssetPosition) {
+          PlayLog.playbackSessionAction(this.currentStreamingSessionId, {
+            actionType: 'PLAYBACK_START',
+            assetPosition: this.currentTime,
+            timestamp: trueTime.now(),
+          }).catch(console.error);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+
+    this.#playbackState = newPlaybackState;
+    this.debugLog(`playbackState: ${newPlaybackState}`);
+    const noPlayerActive = playerState.activePlayer === undefined;
+
+    if (this.isActivePlayer || noPlayerActive) {
+      events.dispatchEvent(playbackStateChange(this.#playbackState));
+    }
+  }
+
+  get playbackState() {
+    return this.#playbackState;
+  }
+
+  get prefetched() {
+    const streamInfo = streamingSessionStore.getStreamInfo(
+      this.currentStreamingSessionId,
+    );
+
+    return streamInfo?.prefetched;
+  }
+
+  set preloadedStreamingSessionId(ssi: string | undefined) {
+    this.#preloadedStreamingSessionId = ssi;
+  }
+
+  get preloadedStreamingSessionId() {
+    return this.#preloadedStreamingSessionId;
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -568,7 +824,7 @@ export class BasePlayer {
     return Promise.resolve();
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars, no-unused-vars
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   seek(_number: number) {}
 
   /**
@@ -617,7 +873,7 @@ export class BasePlayer {
         actionType: 'PLAYBACK_STOP',
         assetPosition,
         timestamp: trueTime.now(),
-      });
+      }).catch(console.error);
     }
   }
 
@@ -635,6 +891,14 @@ export class BasePlayer {
 
   skipToPreloadedMediaProduct() {
     return Promise.resolve();
+  }
+
+  get startAssetPosition() {
+    return this.#startAssetPosition;
+  }
+
+  set startAssetPosition(assetPosition: number) {
+    this.#startAssetPosition = assetPosition;
   }
 
   unloadPreloadedMediaProduct() {
@@ -676,162 +940,6 @@ export class BasePlayer {
     } // else: Will be adjusted on start instead.
   }
 
-  get currentMediaProduct() {
-    return (
-      streamingSessionStore.getMediaProductTransition(
-        this.currentStreamingSessionId,
-      )?.mediaProduct ?? null
-    );
-  }
-
-  set currentStreamingSessionId(ssi: string | undefined) {
-    this.#currentStreamingSessionId = ssi;
-  }
-
-  get currentStreamingSessionId() {
-    return this.#currentStreamingSessionId;
-  }
-
-  set currentTime(seconds: number) {
-    this.#currentTime = seconds;
-    this.#maybeDispatchPreloadRequest();
-  }
-
-  get currentTime() {
-    return this.#currentTime;
-  }
-
-  get duration() {
-    const mtp = streamingSessionStore.getMediaProductTransition(
-      this.currentStreamingSessionId,
-    );
-
-    if (mtp) {
-      return mtp.playbackContext.actualDuration;
-    }
-
-    return null;
-  }
-
-  get expired() {
-    const streamInfo = streamingSessionStore.getStreamInfo(
-      this.currentStreamingSessionId,
-    );
-
-    if (!streamInfo) {
-      return false;
-    }
-
-    // eslint-disable-next-line no-restricted-syntax
-    return streamInfo.expires <= Date.now();
-  }
-
-  get isActivePlayer() {
-    return (
-      playerState.activePlayer && this.name === playerState.activePlayer.name
-    );
-  }
-
-  get nextItem() {
-    if (this.preloadedStreamingSessionId) {
-      return streamingSessionStore.getMediaProductTransition(
-        this.preloadedStreamingSessionId,
-      );
-    }
-
-    return undefined;
-  }
-
-  // eslint-disable-next-line accessor-pairs
-  set outputDeviceType(ot: OutputType | undefined) {
-    this.#outputDeviceType = ot ? transformOutputType(ot) : undefined;
-  }
-
-  set playbackState(newPlaybackState: PlaybackState) {
-    const currentPlaybackState = this.#playbackState;
-
-    // Ignore dispatching playbackStateChange if the state doesn't change.
-    if (currentPlaybackState === newPlaybackState) {
-      return;
-    }
-
-    if (!this.currentStreamingSessionId) {
-      return;
-    }
-
-    const fromTo = (from: PlaybackState, to: PlaybackState) =>
-      currentPlaybackState === from && to === newPlaybackState;
-
-    switch (true) {
-      case fromTo('NOT_PLAYING', 'STALLED'):
-      case fromTo('IDLE', 'STALLED'):
-        return;
-      case fromTo('PLAYING', 'NOT_PLAYING'):
-      case fromTo('PLAYING', 'IDLE'): {
-        this.reportPlaybackProgress(this.currentStreamingSessionId);
-
-        if (this.duration && this.currentTime < this.duration) {
-          PlayLog.playbackSessionAction(this.currentStreamingSessionId, {
-            actionType: 'PLAYBACK_STOP',
-            assetPosition: this.currentTime,
-            timestamp: trueTime.now(),
-          }).catch(console.error);
-        }
-        break;
-      }
-      case fromTo('IDLE', 'PLAYING'):
-      case fromTo('NOT_PLAYING', 'PLAYING'): {
-        if (this.currentTime !== this.startAssetPosition) {
-          PlayLog.playbackSessionAction(this.currentStreamingSessionId, {
-            actionType: 'PLAYBACK_START',
-            assetPosition: this.currentTime,
-            timestamp: trueTime.now(),
-          }).catch(console.error);
-        }
-        break;
-      }
-      default:
-        break;
-    }
-
-    this.#playbackState = newPlaybackState;
-    this.debugLog(`playbackState: ${newPlaybackState}`);
-    const noPlayerActive = playerState.activePlayer === undefined;
-
-    if (this.isActivePlayer || noPlayerActive) {
-      events.dispatchEvent(playbackStateChange(this.#playbackState));
-    }
-  }
-
-  get playbackState() {
-    return this.#playbackState;
-  }
-
-  get prefetched() {
-    const streamInfo = streamingSessionStore.getStreamInfo(
-      this.currentStreamingSessionId,
-    );
-
-    return streamInfo && streamInfo.prefetched;
-  }
-
-  set preloadedStreamingSessionId(ssi: string | undefined) {
-    this.#preloadedStreamingSessionId = ssi;
-  }
-
-  get preloadedStreamingSessionId() {
-    return this.#preloadedStreamingSessionId;
-  }
-
-  get startAssetPosition() {
-    return this.#startAssetPosition;
-  }
-
-  set startAssetPosition(assetPosition: number) {
-    this.#startAssetPosition = assetPosition;
-  }
-
-  // eslint-disable-next-line @typescript-eslint/class-literal-property-style
   get volume() {
     return 1;
   }

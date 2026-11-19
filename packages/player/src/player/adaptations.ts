@@ -1,10 +1,9 @@
 import type shaka from 'shaka-player';
 
-import type { MediaProductTransition } from '../api/event/media-product-transition';
-import { events } from '../event-bus';
-import * as StreamingMetrics from '../internal/event-tracking/streaming-metrics/index';
-import type { Adaptation } from '../internal/event-tracking/streaming-metrics/playback-statistics';
-import { trueTime } from '../internal/true-time';
+import * as StreamingMetrics from '../internal/event-tracking/streaming-metrics/index.js';
+import type { Adaptation } from '../internal/event-tracking/streaming-metrics/playback-statistics.js';
+import { updatePlaybackQuality } from '../internal/helpers/update-playback-quality.js';
+import { trueTime } from '../internal/true-time.js';
 
 export function shakaTrackToAdaptation(
   shakaTrack: shaka.extern.Track,
@@ -45,44 +44,65 @@ export async function saveAdaptation(
   return adaptation;
 }
 
-export function registerAdaptations(shakaPlayer: shaka.Player) {
-  let currentStreamingSessionId: null | string;
+export function registerAdaptations(
+  shakaPlayer: shaka.Player,
+  getOwnSessionId: () => string | undefined,
+  isActivePlayer: () => boolean,
+) {
+  const onManualOrAutomaticQualityChange = () => {
+    if (!isActivePlayer()) {
+      return;
+    }
 
-  const onAdaptation = () => {
     const activeTrack: shaka.extern.Track = shakaPlayer
       .getVariantTracks()
-      .filter(v => v.active)[0]!;
+      .find(v => v.active)!;
 
     const mediaElement = shakaPlayer.getMediaElement();
+    const sessionId = getOwnSessionId();
 
-    if (currentStreamingSessionId && mediaElement) {
-      saveAdaptation(
-        currentStreamingSessionId,
-        activeTrack,
-        mediaElement.currentTime,
-      ).catch(console.error);
+    if (sessionId && mediaElement) {
+      saveAdaptation(sessionId, activeTrack, mediaElement.currentTime).catch(
+        console.error,
+      );
     }
   };
 
-  shakaPlayer.addEventListener('adaptation', onAdaptation);
-  shakaPlayer.addEventListener('variantchanged', onAdaptation);
+  const onAutomaticQualityChange = (ev: Event) => {
+    if (!isActivePlayer()) {
+      return;
+    }
 
-  const onMediaProductTransition: EventListener = e => {
-    if (e instanceof CustomEvent) {
-      const data = (e as MediaProductTransition).detail;
+    // onManualOrAutomaticQualityChange() also guards on isActivePlayer()
+    // for its 'variantchanged' caller, so it's safe to call here without
+    // a second guard -- the redundant call would otherwise re-check the
+    // same state we just confirmed.
+    onManualOrAutomaticQualityChange();
 
-      currentStreamingSessionId = data.playbackContext.playbackSessionId;
+    // Shaka uses FakeEvent which sets properties directly on the event, not in detail
+    const shakaTrack = (ev as Event & { newTrack: shaka.extern.Track })
+      .newTrack;
+    const sessionId = getOwnSessionId();
+
+    if (sessionId) {
+      updatePlaybackQuality(sessionId, shakaTrack);
     }
   };
 
-  events.addEventListener('media-product-transition', onMediaProductTransition);
+  shakaPlayer.addEventListener('adaptation', onAutomaticQualityChange);
+
+  // TODO: if we allow manual adaptation switches, we should check if `playbackContext`
+  // will be updated correctly, or if we should update it here.
+  shakaPlayer.addEventListener(
+    'variantchanged',
+    onManualOrAutomaticQualityChange,
+  );
 
   return function unregister() {
-    shakaPlayer.removeEventListener('adaptation', onAdaptation);
-    shakaPlayer.removeEventListener('variantchanged', onAdaptation);
-    events.removeEventListener(
-      'media-product-transition',
-      onMediaProductTransition,
+    shakaPlayer.removeEventListener('adaptation', onAutomaticQualityChange);
+    shakaPlayer.removeEventListener(
+      'variantchanged',
+      onManualOrAutomaticQualityChange,
     );
   };
 }

@@ -18,61 +18,70 @@ import {
   TokenResponseError,
   UnexpectedError,
   authErrorCodeMap,
-} from '../errors';
+} from '../errors/index.js';
 import {
   deleteCredentials,
   loadCredentials,
   saveCredentialsToStorage,
-} from '../storage/storage';
+  setStorageAdapter,
+} from '../storage/storage.js';
 import type {
   DeviceAuthorizationResponse,
   InitArgs,
   LoginConfig,
   TokenJSONResponse,
   UserCredentials,
-} from '../types';
+} from '../types.js';
 import {
   exponentialBackoff,
   handleErrorResponse,
   handleTokenFetch,
   prepareFetch,
-} from '../utils/fetchHandling';
+} from '../utils/fetchHandling.js';
 import {
   base64URLEncode,
   generateOAuthCodeChallenge,
+  setCryptoAdapter,
   sha256,
-} from '../utils/utils';
+} from '../utils/utils.js';
 
 const state: {
   credentials?: UserCredentials;
   limitedDeviceResponse?: DeviceAuthorizationResponse;
   pending: boolean;
   pendingPromises: Array<(value?: unknown) => void>;
+  /**
+   * Identifies the current session, bumped by {@link logout}. Token requests
+   * remember the id they were started with, which lets {@link persistToken}
+   * drop a response that belongs to a session the user has left in the
+   * meantime.
+   */
+  sessionId: number;
 } = {
   pending: false,
   pendingPromises: [],
+  sessionId: 0,
 };
 
 const TIDAL_LOGIN_SERVICE_BASE_URI = 'https://login.tidal.com/';
 const TIDAL_AUTH_SERVICE_BASE_URI = 'https://auth.tidal.com/v1/';
 const knownSubStatus = ['11003', '6001', '11001', '11002', '11101'];
 
+const listeners: Array<(e: BusEvent) => void> = [];
+
 /**
  * Use this function to e.g. get notified when the credentials have been updated.
  *
  */
 export const bus: Bus = callbackFn => {
-  return globalThis.addEventListener(
-    'authEventBus',
-    callbackFn as EventListener,
-  );
+  listeners.push(callbackFn);
 };
 
 const dispatchEvent = (detail: BusEvent['detail']) => {
-  const event = new CustomEvent('authEventBus', {
-    detail,
-  });
-  globalThis.dispatchEvent(event);
+  const event = { detail } as BusEvent;
+  for (const fn of listeners) {
+    fn(event);
+  }
 };
 
 const dispatchCredentialsUpdated = (credentials: Credentials) => {
@@ -92,10 +101,19 @@ export const init = async ({
   clientSecret,
   clientUniqueKey,
   credentialsStorageKey,
+  crypto,
   scopes,
+  storage,
   tidalAuthServiceBaseUri,
   tidalLoginServiceBaseUri,
 }: InitArgs) => {
+  if (crypto) {
+    setCryptoAdapter(crypto);
+  }
+  if (storage) {
+    setStorageAdapter(storage);
+  }
+
   const persistedCredentials = await loadCredentials(credentialsStorageKey);
 
   const credentials = {
@@ -176,17 +194,24 @@ export const initializeLogin = async ({
  * In case you have a limited input device, e.g. a TV, you can use this method to start the login flow.
  * The method will return a response including a code you need to show to the user along with a url.
  *
+ * @param {Object} [options]
+ * @param {boolean} [options.appApproval] - request a code that the user approves in a TIDAL app instead of on link.tidal.com.
+ * `verificationUriComplete` then points to the approval page, e.g. `https://tidal.com/approve/ABCDEFGH`.
+ *
  * @throws {@link @tidal-music/common!TidalError} - if the auth module has not been initialized
  * @throws {@link UnexpectedError} - if the credentials are not valid (e.g. status 401)
  * @throws {@link @tidal-music/common!RetryableError} - if the server is not reachable (e.g. status 500)
  * @throws {@link @tidal-music/common!NetworkError} - if the client appears to be offline
  */
-export const initializeDeviceLogin = async () => {
+export const initializeDeviceLogin = async ({
+  appApproval = false,
+}: { appApproval?: boolean } = {}) => {
   if (!state.credentials) {
     throw new TidalError(authErrorCodeMap.initError);
   }
 
   const body = {
+    ...(appApproval && { app_approval: 'true' }),
     client_id: state.credentials.clientId,
     ...(state.credentials.clientSecret && {
       client_secret: state.credentials.clientSecret,
@@ -245,6 +270,7 @@ export const finalizeLogin = async (loginResponseQuery: string) => {
     redirectUri,
     scopes,
   } = state.credentials;
+  const { sessionId } = state;
 
   const params = Object.fromEntries(new URLSearchParams(loginResponseQuery));
 
@@ -254,7 +280,9 @@ export const finalizeLogin = async (loginResponseQuery: string) => {
 
   const body = {
     client_id: clientId,
-    client_unique_key: clientUniqueKey ?? '',
+    ...(clientUniqueKey && {
+      client_unique_key: clientUniqueKey,
+    }),
     ...(clientSecret && {
       client_secret: clientSecret,
     }),
@@ -276,7 +304,7 @@ export const finalizeLogin = async (loginResponseQuery: string) => {
 
   const jsonResponse = (await response.json()) as TokenJSONResponse;
 
-  await persistToken(jsonResponse);
+  await persistToken(jsonResponse, sessionId);
 
   return;
 };
@@ -299,13 +327,16 @@ export const finalizeDeviceLogin = async () => {
 
   const { clientId, clientSecret, clientUniqueKey, scopes } = state.credentials;
   const { deviceCode, expiresIn, interval } = state.limitedDeviceResponse;
+  const { sessionId } = state;
 
   const body = {
     client_id: clientId,
     ...(clientSecret && {
       client_secret: clientSecret,
     }),
-    client_unique_key: clientUniqueKey ?? '',
+    ...(clientUniqueKey && {
+      client_unique_key: clientUniqueKey,
+    }),
     device_code: deviceCode,
     grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
     scope: scopes.join(' '),
@@ -330,7 +361,7 @@ export const finalizeDeviceLogin = async () => {
 
     if (response.ok) {
       const jsonResponse = (await response.json()) as TokenJSONResponse;
-      await persistToken(jsonResponse);
+      await persistToken(jsonResponse, sessionId);
       return;
     }
 
@@ -345,7 +376,7 @@ export const finalizeDeviceLogin = async () => {
       if (retriedResponse.ok) {
         const jsonResponse =
           (await retriedResponse.json()) as TokenJSONResponse;
-        await persistToken(jsonResponse);
+        await persistToken(jsonResponse, sessionId);
         return;
       }
 
@@ -364,17 +395,55 @@ export const finalizeDeviceLogin = async () => {
 };
 
 /**
- * Log the user out and clear all local state and the secure storage.
- * Call this method only when the user actively want to log out.
+ * Log the user out and clear the user session, both in memory and in the
+ * secure storage. Call this method only when the user actively wants to log
+ * out.
+ *
+ * The client configuration passed to {@link init} is kept, so the module stays
+ * initialized and does not need to be initialized again after a logout.
+ * {@link getCredentials} keeps working and falls back to client credentials.
  */
 export const logout = () => {
-  dispatchEvent({ type: messageTypes.credentialsUpdated });
   if (state.credentials?.credentialsStorageKey) {
     deleteCredentials(state.credentials.credentialsStorageKey);
   }
-  // clear in memory data as well
-  delete state.credentials;
+
+  if (state.credentials) {
+    // Allow list on purpose: everything that came from `init` is kept, and
+    // anything belonging to the logged in user (tokens, PKCE challenge,
+    // redirect uri) is dropped.
+    const {
+      clientId,
+      clientSecret,
+      clientUniqueKey,
+      credentialsStorageKey,
+      scopes,
+      tidalAuthServiceBaseUri,
+      tidalLoginServiceBaseUri,
+    } = state.credentials;
+
+    state.credentials = {
+      clientId,
+      ...(clientSecret && { clientSecret }),
+      clientUniqueKey,
+      credentialsStorageKey,
+      scopes,
+      tidalAuthServiceBaseUri,
+      tidalLoginServiceBaseUri,
+    };
+  }
+
   delete state.limitedDeviceResponse;
+
+  // Invalidate every token request that is still in flight: its response was
+  // fetched for the session we just left, so persisting it would log the user
+  // right back in.
+  state.sessionId += 1;
+
+  // Announce the change only once the state is cleared, so that a listener
+  // reacting to this event can never read the credentials we just logged out
+  // of.
+  dispatchEvent({ type: messageTypes.credentialsUpdated });
 };
 
 const refreshAccessToken = async () => {
@@ -388,6 +457,7 @@ const refreshAccessToken = async () => {
       refresh_token: state.credentials.refreshToken,
       scope: state.credentials.scopes.join(' '),
     };
+    const { sessionId } = state;
 
     const response = await handleTokenFetch({
       body,
@@ -399,7 +469,7 @@ const refreshAccessToken = async () => {
     }
 
     const jsonResponse = (await response.json()) as TokenJSONResponse;
-    return persistToken(jsonResponse);
+    return persistToken(jsonResponse, sessionId);
   } else {
     return getTokenThroughClientCredentials();
   }
@@ -422,6 +492,7 @@ const upgradeToken = async () => {
       credentials: state.credentials,
       path: 'oauth2/token',
     });
+    const { sessionId } = state;
 
     const response = await exponentialBackoff({
       request: () => globalThis.fetch(url, options),
@@ -437,9 +508,19 @@ const upgradeToken = async () => {
     }
 
     const jsonResponse = (await response.json()) as TokenJSONResponse;
-    return persistToken(jsonResponse);
+    return persistToken(jsonResponse, sessionId);
   } else {
-    return getTokenThroughClientCredentials();
+    if (state.credentials) {
+      const accessTokenResponse = await getTokenThroughClientCredentials();
+      if (accessTokenResponse && 'token' in accessTokenResponse) {
+        // update to stop the upgrade loop
+        state.credentials.previousClientSecret = state.credentials.clientSecret;
+        return accessTokenResponse;
+      } else {
+        throw new RetryableError(authErrorCodeMap.retryableError);
+      }
+    }
+    throw new TidalError(authErrorCodeMap.unexpectedError);
   }
 };
 
@@ -449,8 +530,8 @@ const getTokenThroughClientCredentials = async () => {
       client_id: state.credentials.clientId,
       client_secret: state.credentials.clientSecret,
       grant_type: 'client_credentials',
-      scope: state.credentials.scopes.join(' '),
     };
+    const { sessionId } = state;
 
     const response = await handleTokenFetch({
       body,
@@ -462,7 +543,7 @@ const getTokenThroughClientCredentials = async () => {
     }
 
     const jsonResponse = (await response.json()) as TokenJSONResponse;
-    return persistToken(jsonResponse);
+    return persistToken(jsonResponse, sessionId);
   }
 };
 
@@ -509,13 +590,13 @@ const getCredentialsInternal = async (apiErrorSubStatus?: string) => {
     const oneMinute = 60 * 1000;
 
     if (accessToken) {
-      const newScopeIsSameOrSubset = state.credentials.scopes.every(
-        scope => accessToken.grantedScopes?.includes(scope),
+      const newScopeIsSameOrSubset = state.credentials.scopes.every(scope =>
+        accessToken.grantedScopes?.includes(scope),
       );
 
       if (
         state.credentials.clientUniqueKey !== accessToken.clientUniqueKey ||
-        newScopeIsSameOrSubset === false
+        (accessToken.userId && newScopeIsSameOrSubset === false)
       ) {
         logout();
         throw new IllegalArgumentError(authErrorCodeMap.illegalArgumentError);
@@ -523,8 +604,11 @@ const getCredentialsInternal = async (apiErrorSubStatus?: string) => {
 
       const shouldUpgradeToken =
         state.credentials.clientId !== accessToken?.clientId ||
-        state.credentials.previousClientSecret !==
-          state.credentials.clientSecret;
+        Boolean(
+          state.credentials.previousClientSecret &&
+          state.credentials.previousClientSecret !==
+            state.credentials.clientSecret,
+        );
 
       if (shouldUpgradeToken) {
         const upgradeTokenResponse = await upgradeToken();
@@ -599,8 +683,8 @@ export const setCredentials = async ({
     throw new TidalError(authErrorCodeMap.initError);
   }
 
-  const newScopeIsSubset = state.credentials.scopes.every(
-    scope => accessToken.grantedScopes?.includes(scope),
+  const newScopeIsSubset = state.credentials.scopes.every(scope =>
+    accessToken.grantedScopes?.includes(scope),
   );
 
   if (
@@ -635,12 +719,23 @@ const persistCredentials = (updatedCredentials: UserCredentials) => {
   return saveCredentialsToStorage(state.credentials);
 };
 
-const persistToken = async (jsonResponse: TokenJSONResponse) => {
-  if (!state.credentials) {
+/**
+ * Store a freshly fetched token as the current credentials.
+ *
+ * @param sessionId - the value of `state.sessionId` from before the token was
+ * requested. A mismatch means the user logged out while the request was in
+ * flight, in which case the token is dropped instead of persisted.
+ */
+const persistToken = async (
+  jsonResponse: TokenJSONResponse,
+  sessionId: number,
+) => {
+  if (!state.credentials || sessionId !== state.sessionId) {
     throw new TidalError(authErrorCodeMap.initError);
   }
 
-  const { clientId, clientUniqueKey, scopes } = state.credentials;
+  const { clientId, clientUniqueKey, credentialsStorageKey, scopes } =
+    state.credentials;
 
   const grantedScopes = jsonResponse.scope?.length
     ? jsonResponse.scope?.split(' ')
@@ -659,14 +754,33 @@ const persistToken = async (jsonResponse: TokenJSONResponse) => {
     }),
   };
 
-  await persistCredentials({
-    ...state.credentials,
-    accessToken,
-    // there is no refreshToken when renewing the accessToken
-    ...(jsonResponse.refresh_token && {
-      refreshToken: jsonResponse.refresh_token,
-    }),
-  });
+  try {
+    await persistCredentials({
+      ...state.credentials,
+      accessToken,
+      // there is no refreshToken when renewing the accessToken
+      ...(jsonResponse.refresh_token && {
+        refreshToken: jsonResponse.refresh_token,
+      }),
+    });
+  } catch (error) {
+    // A logout removes the key material the write needs, so a storage failure
+    // here is that logout and not a broken storage. Report it as such.
+    if (sessionId !== state.sessionId) {
+      throw new TidalError(authErrorCodeMap.initError);
+    }
+
+    throw error;
+  }
+
+  // The storage write is asynchronous, so a logout can land in the middle of
+  // it and have its (synchronous) delete complete first. That leaves the token
+  // we just wrote behind for the next `loadCredentials` to pick up, so undo it.
+  if (sessionId !== state.sessionId) {
+    deleteCredentials(credentialsStorageKey);
+
+    throw new TidalError(authErrorCodeMap.initError);
+  }
 
   return accessToken;
 };
