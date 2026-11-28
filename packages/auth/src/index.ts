@@ -1,7 +1,7 @@
 /* c8 ignore start index file */
 import type { CredentialsProvider } from '@tidal-music/common';
 
-import { bus, getCredentials } from './auth/auth';
+import { bus, getCredentials } from './auth/auth.js';
 
 export {
   finalizeDeviceLogin,
@@ -11,18 +11,19 @@ export {
   initializeLogin,
   logout,
   setCredentials,
-} from './auth/auth';
+} from './auth/auth.js';
 
-export type * from './types';
+export { authErrorCodeMap } from './errors/index.js';
 
-export { authErrorCodeMap } from './errors';
 export type {
   AuthErrorCodes,
   AuthErrorNames,
   AuthenticationError,
   TokenResponseError,
   UnexpectedError,
-} from './errors';
+} from './errors/index.js';
+
+export type * from './types.js';
 
 export const credentialsProvider: CredentialsProvider = {
   bus,

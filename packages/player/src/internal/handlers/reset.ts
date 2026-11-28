@@ -1,8 +1,8 @@
 import {
   cancelQueuedOnendedHandler,
   resetAllPlayers,
-} from '../../player/index';
-import ConnectionHandler from '../services/connection-handler';
+} from '../../player/index.js';
+import ConnectionHandler from '../services/connection-handler.js';
 
 /**
  * Gracefully reset to a clean initial state. Stops playback, removes any
@@ -11,7 +11,7 @@ import ConnectionHandler from '../services/connection-handler';
  * Playback state will immediately change to IDLE.
  *
  * @returns {Promise<void>}
- * @see {@link import('../../api/event/playback-state-change').PlaybackStateChange}
+ * @see {@link PlaybackStateChange}
  */
 export async function reset() {
   cancelQueuedOnendedHandler();

@@ -1,6 +1,6 @@
-import { type PluginOption } from 'vite';
+import { type PluginOption, type UserConfig } from 'vite';
 import dts from 'vite-plugin-dts';
-import { type UserConfig, defineConfig } from 'vitest/config';
+import { defineConfig } from 'vitest/config';
 
 export default defineConfig(({ command, mode }) => {
   // needed for demo cors
@@ -36,9 +36,10 @@ export default defineConfig(({ command, mode }) => {
       },
       minify: mode === 'development' ? false : 'esbuild',
     },
-    plugins: [dts({ rollupTypes: true, tsconfigPath: 'tsconfig.build.json' })],
+    plugins: [dts({ bundleTypes: false, tsconfigPath: 'tsconfig.build.json' })],
     test: {
       coverage: {
+        provider: 'v8',
         reportOnFailure: true,
         reporter: process.env.CI ? ['json', 'json-summary'] : ['html'],
         thresholds: {
@@ -57,7 +58,7 @@ export default defineConfig(({ command, mode }) => {
       format: 'es',
       plugins: () => [
         dts({
-          rollupTypes: true,
+          bundleTypes: false,
           tsconfigPath: 'tsconfig.build.json',
         }) as PluginOption,
       ],

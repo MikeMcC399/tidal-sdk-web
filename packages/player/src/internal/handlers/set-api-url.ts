@@ -1,20 +1,17 @@
-import * as Config from '../../config';
+import * as Config from '../../config.js';
 
 /**
- * Configure the module to use another URL for the API than the normal one.
+ * Configure the module to use a custom URL for the OpenAPI API (e.g. track manifests).
  *
- * @param {string} apiUrl
+ * @param apiUrl - URL for the main (OpenAPI) API.
  */
 export function setApiUrl(apiUrl: string) {
   // eslint-disable-next-line no-useless-catch
   try {
-    // eslint-disable-next-line no-new
     new URL(apiUrl);
   } catch (e) {
     throw e;
   }
 
-  Config.update({
-    apiUrl,
-  });
+  Config.update({ apiUrl });
 }

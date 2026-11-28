@@ -1,36 +1,81 @@
 import type { CredentialsProvider } from '@tidal-music/common';
+import type * as _EventSender from '@tidal-music/event-producer';
 
-import * as Config from '../config';
+type EventSender = typeof _EventSender;
 
-import { waitForEvent } from './helpers/wait-for';
+import * as Config from '../config.js';
+
+import { waitForEvent } from './helpers/wait-for.js';
+
+class EventSenderStore extends EventTarget {
+  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+  // @ts-ignore - Setter
+  #eventSender: EventSender;
+
+  set eventSender(newEventSender: EventSender) {
+    this.#eventSender = newEventSender;
+  }
+
+  get eventSender() {
+    return this.#eventSender;
+  }
+
+  hasEventSender() {
+    return Boolean(this.#eventSender);
+  }
+}
+
+/**
+ * The code `@tidal-music/auth` rejects with when it has no credentials to hand
+ * out at all: it was never initialized, or the user logged out while the
+ * request was in flight.
+ */
+const AUTH_NO_CREDENTIALS_ERROR_CODE = 'A0001';
+
+/**
+ * Turns "the provider has no credentials for us" into `undefined`, i.e. an
+ * unauthenticated user, and rethrows everything else -- a failed refresh or a
+ * network problem is a real error and must not be reported as a logged out
+ * user.
+ *
+ * Matched on the error code instead of `instanceof TidalError` because the auth
+ * module and the player do not share a copy of that class.
+ */
+const asUnauthenticated = (error: unknown) => {
+  if (
+    (error as { errorCode?: unknown } | null)?.errorCode ===
+    AUTH_NO_CREDENTIALS_ERROR_CODE
+  ) {
+    return undefined;
+  }
+
+  throw error;
+};
 
 class CredentialsProviderStore extends EventTarget {
   // eslint-disable-next-line @typescript-eslint/ban-ts-comment
   // @ts-ignore - Setter
   #credentialsProvider: CredentialsProvider;
-
-  async dispatchAuthorized() {
-    const credentials = await this.#credentialsProvider.getCredentials();
-
-    if (credentials?.token) {
-      this.dispatchEvent(
-        new CustomEvent('authorized', {
-          detail: {
-            credentials,
-          },
-        }),
-      );
-    }
-  }
+  #credentialsProviderSubscriptionId = 0;
 
   set credentialsProvider(newCredentialsProvider: CredentialsProvider) {
+    if (this.#credentialsProvider === newCredentialsProvider) {
+      return;
+    }
+
     this.#credentialsProvider = newCredentialsProvider;
-    this.dispatchAuthorized().catch(console.error);
+    this.#credentialsProviderSubscriptionId += 1;
+    const subscriptionId = this.#credentialsProviderSubscriptionId;
+    this.dispatchAuthorized(subscriptionId).catch(console.error);
 
     this.#credentialsProvider.bus(event => {
+      if (subscriptionId !== this.#credentialsProviderSubscriptionId) {
+        return;
+      }
+
       switch (event.detail.type) {
-        case 'credentialsUpdated':
-          this.dispatchAuthorized().catch(console.error);
+        case 'CredentialsUpdatedMessage':
+          this.dispatchAuthorized(subscriptionId).catch(console.error);
           break;
         default:
           console.warn('Unhandled event from credentials provider: ', event);
@@ -41,6 +86,39 @@ class CredentialsProviderStore extends EventTarget {
 
   get credentialsProvider() {
     return this.#credentialsProvider;
+  }
+
+  async dispatchAuthorized(subscriptionId?: number) {
+    const credentials = await this.#credentialsProvider
+      .getCredentials()
+      .catch(asUnauthenticated);
+
+    // The provider may have been swapped while getCredentials() was in
+    // flight. If a subscriptionId was supplied (i.e. caller observed a
+    // specific provider), skip the dispatch when it no longer matches the
+    // active provider's id -- otherwise we'd fire `authorized` /
+    // `unauthenticated` for a stale provider on top of whatever the new
+    // provider has already dispatched.
+    if (
+      subscriptionId !== undefined &&
+      subscriptionId !== this.#credentialsProviderSubscriptionId
+    ) {
+      return;
+    }
+
+    if (credentials?.token) {
+      this.dispatchEvent(
+        new CustomEvent('authorized', {
+          detail: {
+            credentials,
+          },
+        }),
+      );
+    } else {
+      this.dispatchEvent(
+        new CustomEvent('unauthenticated', { detail: { credentials } }),
+      );
+    }
   }
 }
 
@@ -175,7 +253,9 @@ type ShakaDrmErrorCodes =
   | 'S6016'
   | 'S6017';
 type ShakaPlayerErrorCodes = 'S7000' | 'S7001' | 'S7002' | 'S7003' | 'S7004';
+type MediaElementErrorCodes = 'ME01';
 export type ErrorCodes =
+  | MediaElementErrorCodes
   | NativePlayerDeviceErrorCodes
   | NativePlayerNetworkErrorCodes
   | NativePlayerOfflineErrorCodes
@@ -200,7 +280,6 @@ export class PlayerError extends Error {
   referenceId: string | undefined;
 
   constructor(errorId: ErrorIds, errorCode: ErrorCodes, referenceId?: string) {
-    // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
     super(`${errorId}: ${errorCode} (${referenceId})`);
 
     this.errorId = errorId;
@@ -229,10 +308,11 @@ export class PlayerError extends Error {
  */
 export async function isAuthorizedWithUser() {
   if (credentialsProviderStore.credentialsProvider) {
-    const credentials =
-      await credentialsProviderStore.credentialsProvider.getCredentials();
+    const credentials = await credentialsProviderStore.credentialsProvider
+      .getCredentials()
+      .catch(asUnauthenticated);
 
-    return Boolean(credentials.token && credentials.userId);
+    return Boolean(credentials?.token && credentials.userId);
   }
 
   await waitForEvent(credentialsProviderStore, 'authorized');
@@ -241,6 +321,7 @@ export async function isAuthorizedWithUser() {
 }
 
 export const credentialsProviderStore = new CredentialsProviderStore();
+export const eventSenderStore = new EventSenderStore();
 
 /**
  * Starts streaming privileges and event code if the credentials allow it.
@@ -249,15 +330,9 @@ async function handleAuthorized() {
   const authorizedWithUser = await isAuthorizedWithUser();
 
   const startPushkin = async () => {
-    const { Pushkin } = await import('./services/pushkin');
+    const { Pushkin } = await import('./services/pushkin.js');
 
     return Pushkin.refresh();
-  };
-
-  const startBeacon = async () => {
-    const Beacon = await import('./beacon/index');
-
-    return Beacon.start();
   };
 
   if (authorizedWithUser) {
@@ -266,7 +341,7 @@ async function handleAuthorized() {
     });
 
     try {
-      await Promise.all([startPushkin(), startBeacon()]);
+      await Promise.all([startPushkin()]);
     } catch (e) {
       console.error(e);
     }
@@ -277,8 +352,21 @@ async function handleAuthorized() {
   }
 }
 
+/**
+ * Starts event tracking if user is unauthenticated.
+ */
+function handleUnauthenticated() {
+  Config.update({
+    gatherEvents: true,
+  });
+}
+
 credentialsProviderStore.addEventListener('authorized', () => {
   handleAuthorized().then().catch(console.error);
+});
+
+credentialsProviderStore.addEventListener('unauthenticated', () => {
+  handleUnauthenticated();
 });
 
 /**

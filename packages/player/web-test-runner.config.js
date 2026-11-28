@@ -16,7 +16,11 @@ export default {
     // playwrightLauncher({ product: 'chromium', launchOptions: { args: ['--no-sandbox', '--autoplay-policy=no-user-gesture-required'] } }),
     chromeLauncher({
       launchOptions: {
-        args: ['--no-sandbox', '--autoplay-policy=no-user-gesture-required'],
+        args: [
+          '--disable-web-security',
+          '--no-sandbox',
+          '--autoplay-policy=no-user-gesture-required',
+        ],
       },
     }),
     // playwrightLauncher({ product: 'firefox' }),
@@ -24,11 +28,15 @@ export default {
   ],
   concurrency: 1,
   coverage: true,
+  debug: false,
   files: ['src/**/*.test.ts'],
+  filterBrowserLogs: () => true,
   nodeResolve: true,
   plugins: [
     // Transform dependencies that doesn't provide ESM from CJS to ESM.
-    commonjs(),
+    commonjs({
+      strictRequires: 'auto',
+    }),
     replace({
       preventAssignment: true,
       'process.env.TEST_USER': process.env.TEST_USER,
@@ -37,6 +45,7 @@ export default {
   ],
   // In a monorepo you need to set set the root dir to resolve modules (https://modern-web.dev/docs/test-runner/cli-and-configuration/)
   rootDir: '../../',
+  staticLogging: true,
   testFramework: {
     config: {
       timeout: '20000',

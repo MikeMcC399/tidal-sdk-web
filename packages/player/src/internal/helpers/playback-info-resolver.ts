@@ -1,25 +1,36 @@
-import type { MediaProduct } from '../../api/interfaces';
-import * as Config from '../../config';
-import type { ErrorCodes, ErrorIds } from '../../internal/index';
-import { PlayerError } from '../../internal/index';
-import type { AudioQuality } from '../../internal/types';
-import * as StreamingMetrics from '../event-tracking/streaming-metrics';
-import { waitFor } from '../helpers/wait-for';
-import { trueTime } from '../true-time';
+import { type components, createAPIClient } from '@tidal-music/api';
+import shaka from 'shaka-player';
 
-type VideoQuality = 'AUDIO_ONLY' | 'HIGH' | 'LOW' | 'MEDIUM';
-
-type AudioMode = 'DOLBY_ATMOS' | 'SONY_360RA' | 'STEREO';
-type AssetPresentation = 'FULL' | 'PREVIEW';
-type SteamType = 'LIVE' | 'ON_DEMAND';
+import type { MediaProduct } from '../../api/interfaces.js';
+import * as Config from '../../config.js';
+import type { ErrorCodes, ErrorIds } from '../../internal/index.js';
+import { PlayerError, credentialsProviderStore } from '../../internal/index.js';
+import type {
+  AssetPresentation,
+  AudioMode,
+  AudioQuality,
+  PreviewReason,
+  StreamType,
+  VideoQuality,
+} from '../../internal/types.js';
+import * as StreamingMetrics from '../event-tracking/streaming-metrics/index.js';
+import { timestamps } from '../helpers/streaming-metrics-timestamps.js';
+import { waitFor } from '../helpers/wait-for.js';
 
 type BasePlaybackInfo = {
+  /**
+   * How the asset is presented to the user.
+   */
   assetPresentation: AssetPresentation;
   licenseSecurityToken?: string;
   manifest: string;
   manifestHash?: string;
   manifestMimeType: string;
   prefetched: boolean;
+  /**
+   * The reason why the asset is presented as a preview.
+   */
+  previewReason?: PreviewReason;
   streamingSessionId: string;
 };
 
@@ -28,15 +39,15 @@ export type PlaybackInfoTrack = BasePlaybackInfo & {
   albumReplayGain: number;
   audioMode: AudioMode;
   audioQuality: AudioQuality;
-  bitDepth: null | number; // API sends null
-  sampleRate: null | number; // API sends null
+  bitDepth: number | null; // API sends null
+  sampleRate: number | null; // API sends null
   trackId: number;
   trackPeakAmplitude: number;
   trackReplayGain: number;
 };
 
 export type PlaybackInfoVideo = BasePlaybackInfo & {
-  streamType: SteamType;
+  streamType: StreamType;
   videoId: number;
   videoQuality: VideoQuality;
 };
@@ -45,15 +56,16 @@ type ExtraFields = {
   expires: number;
 };
 
-export type PlaybackInfo = BasePlaybackInfo &
-  (PlaybackInfoTrack | PlaybackInfoVideo) &
-  ExtraFields;
+export type PlaybackInfo = ExtraFields &
+  (PlaybackInfoTrack | PlaybackInfoVideo);
 
-type Options = {
+export type Options = {
   accessToken: string | undefined;
+  audioAdaptiveBitrateStreaming: boolean;
   audioQuality: AudioQuality;
-  clientId: null | string;
+  clientId: string | null;
   mediaProduct: MediaProduct;
+  playerType?: 'browser' | 'native' | 'shaka';
   prefetch: boolean;
   streamingSessionId: string;
 };
@@ -64,6 +76,8 @@ type PlaybackInfoErrorResponse = {
   userMessage: string;
 };
 
+const MANIFEST_EXPIRATION_MS = 3600000; // 1 hour
+
 const fetchWithRetries = async (
   url: string,
   options = {},
@@ -71,7 +85,7 @@ const fetchWithRetries = async (
 ): Promise<Response> => {
   const MAX_RETRY_COUNT = 4;
   let res: Response | undefined;
-  let status: null | number | undefined;
+  let status: number | null | undefined;
 
   try {
     res = await fetch(url, options);
@@ -106,7 +120,7 @@ const fetchWithRetries = async (
   }
 
   if (!res) {
-    throw new Error('Retries exchaused. Cannot fetch playbackinfo.');
+    throw new Error('Retries exhausted. Cannot fetch playbackinfo.');
   }
 
   return res;
@@ -114,13 +128,13 @@ const fetchWithRetries = async (
 
 function getErrorId(status: number, subStatus: number): ErrorIds {
   switch (subStatus) {
+    case 4010:
+      return 'PEMonthlyStreamQuotaExceeded';
     case 4032:
     case 4035:
       return 'PEContentNotAvailableInLocation';
     case 4033:
       return 'PEContentNotAvailableForSubscription';
-    case 4010:
-      return 'PEMonthlyStreamQuotaExceeded';
     default:
       break;
   }
@@ -138,8 +152,9 @@ function getErrorId(status: number, subStatus: number): ErrorIds {
 
 // type def with "& URLSearchParams" is not the same as "interface extends".
 // eslint-disable-next-line @typescript-eslint/consistent-type-definitions
-interface URLSearchParamsCustomSetters<T extends string>
-  extends URLSearchParams {
+interface URLSearchParamsCustomSetters<
+  T extends string,
+> extends URLSearchParams {
   set: (name: T, value: string) => void;
 }
 
@@ -149,7 +164,9 @@ interface HeadersCustomSetters<T extends string> extends Headers {
   set: (name: T, value: string) => void;
 }
 
-async function _fetch(options: Options): Promise<PlaybackInfo> {
+async function _fetchLegacyPlaybackInfo(
+  options: Options,
+): Promise<PlaybackInfo> {
   const {
     accessToken,
     audioQuality,
@@ -158,11 +175,11 @@ async function _fetch(options: Options): Promise<PlaybackInfo> {
     prefetch,
     streamingSessionId,
   } = options;
-  const apiUrl = Config.get('apiUrl');
-  const url = new URL(
-    `${apiUrl}/${mediaProduct.productType}s/${mediaProduct.productId}/playbackinfo`,
-  );
 
+  const legacyApiUrl = Config.get('legacyApiUrl');
+  const url = new URL(
+    `${legacyApiUrl}/${mediaProduct.productType}s/${mediaProduct.productId}/playbackinfo`,
+  );
   const searchParams = url.searchParams as URLSearchParamsCustomSetters<
     'assetpresentation' | 'audioquality' | 'playbackmode' | 'videoquality'
   >;
@@ -214,7 +231,7 @@ async function _fetch(options: Options): Promise<PlaybackInfo> {
       },
       3,
     );
-  } catch (e) {
+  } catch {
     throw new PlayerError('PENetwork', 'NPBI0');
   }
 
@@ -237,36 +254,277 @@ async function _fetch(options: Options): Promise<PlaybackInfo> {
 
   return {
     ...json,
+    // eslint-disable-next-line no-restricted-syntax
+    expires: Date.now() + MANIFEST_EXPIRATION_MS,
     prefetched: prefetch,
   };
 }
 
+function audioFormatsToQuality(
+  formats: components['schemas']['TrackManifests_Attributes']['formats'],
+): AudioQuality {
+  if (!Array.isArray(formats)) {
+    throw new Error('Invalid formats array');
+  }
+
+  if (formats.length === 0) {
+    throw new Error('Empty formats array');
+  }
+
+  if (formats.includes('FLAC_HIRES')) {
+    return 'HI_RES_LOSSLESS';
+  } else if (formats.includes('FLAC')) {
+    return 'LOSSLESS';
+  } else if (formats.includes('AACLC')) {
+    return 'HIGH';
+  } else {
+    // Only 'HEAACV1' or something unknown
+    return 'LOW';
+  }
+}
+
+function audioQualityToFormats(
+  quality: AudioQuality,
+): NonNullable<components['schemas']['TrackManifests_Attributes']['formats']> {
+  switch (quality) {
+    case 'HI_RES':
+    case 'HI_RES_LOSSLESS':
+      return ['HEAACV1', 'AACLC', 'FLAC', 'FLAC_HIRES'];
+    case 'HIGH':
+      return ['HEAACV1', 'AACLC'];
+    case 'LOSSLESS':
+      return ['HEAACV1', 'AACLC', 'FLAC'];
+    case 'LOW':
+    default:
+      return ['HEAACV1'];
+  }
+}
+
+/**
+ * Splits a data URL into its MIME type and base64-encoded data components.
+ * To match old API and internal structure.
+ */
+function parseDataUrl(dataUrl: string | undefined):
+  | {
+      manifest: string;
+      manifestMimeType: string;
+    }
+  | undefined {
+  if (!dataUrl) {
+    return;
+  }
+  const regex = /data:([^;]+);base64,(.+)/;
+  const matches = regex.exec(dataUrl);
+
+  if (!matches || matches.length < 3) {
+    return;
+  }
+
+  const manifestMimeType = matches[1]?.trim();
+  const manifest = matches[2]?.trim();
+
+  if (!manifestMimeType || !manifest) {
+    return;
+  }
+
+  return {
+    manifest,
+    manifestMimeType,
+  };
+}
+
+/**
+ * Fetches the track manifest for a given media product using the API client.
+ * Transient failures (network errors, timeouts, 429/5xx) are retried inside
+ * `createAPIClient`'s default retry mechanism.
+ */
+// eslint-disable-next-line complexity
+async function _fetchTrackManifest(options: Options): Promise<PlaybackInfo> {
+  // TODO: consider saving the API client for reuse
+  const apiClient = createAPIClient(
+    credentialsProviderStore.credentialsProvider,
+    Config.get('apiUrl'),
+  );
+
+  const {
+    audioAdaptiveBitrateStreaming,
+    audioQuality,
+    mediaProduct,
+    prefetch,
+    streamingSessionId,
+  } = options;
+  const { productId: trackId, shareCode } = mediaProduct;
+
+  const isFairPlaySupported = await shaka.drm.FairPlay.isFairPlaySupported();
+
+  let response;
+  try {
+    response = await apiClient.GET('/trackManifests/{id}', {
+      params: {
+        headers: {
+          'x-playback-session-id': streamingSessionId,
+        },
+        path: {
+          id: trackId,
+        },
+        query: {
+          adaptive: audioAdaptiveBitrateStreaming,
+          formats: audioQualityToFormats(audioQuality),
+          manifestType: isFairPlaySupported ? 'HLS' : 'MPEG_DASH',
+          shareCode,
+          uriScheme: 'DATA',
+          usage: 'PLAYBACK',
+        },
+      },
+    });
+  } catch {
+    throw new PlayerError('PENetwork', 'NPBI0');
+  }
+
+  if (response.error) {
+    throw new PlayerError(getErrorId(response.response.status, 0), 'NPBI0');
+  }
+
+  const parsed = parseDataUrl(response.data?.data.attributes?.uri);
+
+  const manifest = parsed?.manifest;
+  const manifestMimeType = parsed?.manifestMimeType;
+
+  if (!manifest || !manifestMimeType) {
+    throw new PlayerError('EUnexpected', 'B9999');
+  }
+
+  return {
+    albumPeakAmplitude:
+      response.data?.data.attributes?.albumAudioNormalizationData
+        ?.peakAmplitude ?? 0,
+    albumReplayGain:
+      response.data?.data.attributes?.albumAudioNormalizationData?.replayGain ??
+      0,
+    assetPresentation:
+      response.data?.data.attributes?.trackPresentation ?? 'PREVIEW',
+    audioMode: 'STEREO', // Only stereo (and mono) supported for now, TODO: revise or remove if multi-channel is added
+    audioQuality: audioFormatsToQuality(
+      // PS: this is the highest quality returned by API, not necessarily the quality requested by the user or the one that is currently playing (when in ABR mode).
+      response.data?.data.attributes?.formats,
+    ),
+    bitDepth: 0,
+    // eslint-disable-next-line no-restricted-syntax
+    expires: Date.now() + MANIFEST_EXPIRATION_MS,
+    manifest,
+    manifestHash: response.data?.data.attributes?.hash,
+    manifestMimeType,
+    prefetched: prefetch,
+    previewReason: response.data?.data.attributes?.previewReason,
+    sampleRate: 0,
+    streamingSessionId,
+    trackId: response.data?.data.id ? Number(response.data.data.id) : 0,
+    trackPeakAmplitude:
+      response.data?.data.attributes?.trackAudioNormalizationData
+        ?.peakAmplitude ?? 0,
+    trackReplayGain:
+      response.data?.data.attributes?.trackAudioNormalizationData?.replayGain ??
+      0,
+  };
+}
+
+/**
+ * Fetches the video manifest for a given media product using the API client.
+ * Transient failures (network errors, timeouts, 429/5xx) are retried inside
+ * `createAPIClient`'s default retry mechanism.
+ */
+async function _fetchVideoManifest(options: Options): Promise<PlaybackInfo> {
+  const apiClient = createAPIClient(
+    credentialsProviderStore.credentialsProvider,
+    Config.get('apiUrl'),
+  );
+
+  const { mediaProduct, prefetch, streamingSessionId } = options;
+  const videoId = mediaProduct.productId;
+
+  let response;
+  try {
+    response = await apiClient.GET('/videoManifests/{id}', {
+      params: {
+        headers: {
+          'x-playback-session-id': streamingSessionId,
+        },
+        path: {
+          id: videoId,
+        },
+        query: {
+          uriScheme: 'DATA',
+          usage: 'PLAYBACK',
+        },
+      },
+    });
+  } catch {
+    throw new PlayerError('PENetwork', 'NPBI0');
+  }
+
+  if (response.error) {
+    throw new PlayerError(getErrorId(response.response.status, 0), 'NPBI0');
+  }
+
+  const parsed = parseDataUrl(response.data?.data.attributes?.link?.href);
+
+  const manifest = parsed?.manifest;
+  const manifestMimeType = parsed?.manifestMimeType;
+
+  if (!manifest || !manifestMimeType) {
+    throw new PlayerError('EUnexpected', 'B9999');
+  }
+
+  return {
+    assetPresentation:
+      response.data?.data.attributes?.videoPresentation ?? 'PREVIEW',
+    // eslint-disable-next-line no-restricted-syntax
+    expires: Date.now() + MANIFEST_EXPIRATION_MS,
+    manifest,
+    manifestMimeType,
+    prefetched: prefetch,
+    previewReason: response.data?.data.attributes?.previewReason,
+    streamType: 'ON_DEMAND',
+    streamingSessionId,
+    videoId: response.data?.data.id ? Number(response.data.data.id) : 0,
+    videoQuality: 'HIGH',
+  };
+}
+
+/**
+ * Fetches playback information for a media product.
+ *
+ * @param options - The options for fetching playback info including media product, audio quality, and streaming session ID.
+ * @returns A promise that resolves to the playback information.
+ */
 export async function fetchPlaybackInfo(options: Options) {
   const { streamingSessionId } = options;
   const events = [];
+  let fetchError: Error | PlayerError | undefined;
 
-  performance.mark('streaming_metrics:playback_info_fetch:startTimestamp', {
-    detail: streamingSessionId,
-    startTime: trueTime.now(),
-  });
+  timestamps.mark(
+    'streaming_metrics:playback_info_fetch:startTimestamp',
+    streamingSessionId,
+  );
 
   try {
-    const playbackInfo = await _fetch(options);
+    let playbackInfo: PlaybackInfo;
+
+    if (options.playerType === 'native') {
+      playbackInfo = await _fetchLegacyPlaybackInfo(options);
+    } else if (options.mediaProduct.productType === 'video') {
+      playbackInfo = await _fetchVideoManifest(options);
+    } else {
+      playbackInfo = await _fetchTrackManifest(options);
+    }
 
     if (playbackInfo === undefined) {
       throw new Error('Playback info was fetched, but undefined.');
     }
 
-    StreamingMetrics.playbackInfoFetch({
-      endReason: 'COMPLETE',
-      streamingSessionId,
-    }).catch(console.error);
-
-    // eslint-disable-next-line no-restricted-syntax
-    playbackInfo.expires = Date.now() + 3600000; // An hour after fetch
-
     const hasAds = 'adInfo' in playbackInfo;
 
+    // TODO: add previewReason to the playback statistics event
     if ('trackId' in playbackInfo) {
       StreamingMetrics.playbackStatistics({
         actualAssetPresentation: playbackInfo.assetPresentation,
@@ -291,30 +549,26 @@ export async function fetchPlaybackInfo(options: Options) {
       }).catch(console.error);
     }
 
-    performance.mark('streaming_metrics:playback_info_fetch:endTimestamp', {
-      detail: streamingSessionId,
-      startTime: trueTime.now(),
-    });
+    timestamps.mark(
+      'streaming_metrics:playback_info_fetch:endTimestamp',
+      streamingSessionId,
+    );
 
     return playbackInfo;
   } catch (e) {
-    performance.mark('streaming_metrics:playback_info_fetch:endTimestamp', {
-      detail: streamingSessionId,
-      startTime: trueTime.now(),
-    });
+    fetchError = e as Error | PlayerError;
 
-    StreamingMetrics.playbackInfoFetch({
-      endReason: 'ERROR',
-      errorCode: (e as Error | PlayerError).message,
-      errorMessage: (e as Error | PlayerError).stack,
+    timestamps.mark(
+      'streaming_metrics:playback_info_fetch:endTimestamp',
       streamingSessionId,
-    }).catch(console.error);
+    );
 
     events.push(
       StreamingMetrics.streamingSessionEnd({
         streamingSessionId,
-        timestamp: trueTime.timestamp(
+        timestamp: timestamps.get(
           'streaming_metrics:playback_info_fetch:endTimestamp',
+          streamingSessionId,
         ),
       }),
     );
@@ -322,27 +576,42 @@ export async function fetchPlaybackInfo(options: Options) {
     // Continue throwing to the loadHandler and nextHandler.
     throw e;
   } finally {
+    /*
+      The error fields must be part of this single reducer call. Previously
+      they were written in a separate fire-and-forget call from the catch
+      block, which raced with this one: both calls read the stored event
+      before either had written, so the payload committed below always came
+      out with the default endReason 'COMPLETE' and errors were never
+      reported.
+    */
     events.push(
       StreamingMetrics.playbackInfoFetch({
-        endTimestamp: trueTime.timestamp(
+        endReason: fetchError ? 'ERROR' : 'COMPLETE',
+        endTimestamp: timestamps.get(
           'streaming_metrics:playback_info_fetch:endTimestamp',
+          streamingSessionId,
         ),
-        startTimestamp: trueTime.timestamp(
+        errorCode: fetchError
+          ? ((fetchError as PlayerError).errorCode ?? fetchError.message)
+          : null,
+        errorMessage: fetchError ? (fetchError.stack ?? null) : null,
+        startTimestamp: timestamps.get(
           'streaming_metrics:playback_info_fetch:startTimestamp',
+          streamingSessionId,
         ),
         streamingSessionId,
       }),
     );
 
-    StreamingMetrics.commit({
-      events,
-    }).catch(console.error);
+    StreamingMetrics.commit(events).catch(console.error);
 
-    performance.clearMarks(
+    timestamps.clear(
       'streaming_metrics:playback_info_fetch:endTimestamp',
+      streamingSessionId,
     );
-    performance.clearMarks(
+    timestamps.clear(
       'streaming_metrics:playback_info_fetch:startTimestamp',
+      streamingSessionId,
     );
   }
 }

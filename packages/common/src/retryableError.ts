@@ -1,4 +1,5 @@
-import { type ErrorOptions, TidalError } from './tidalError';
+import { captureStackTrace } from './captureStackTrace.js';
+import { type ErrorOptions, TidalError } from './tidalError.js';
 
 /**
  * This is a pretty "rough" and "unprecise" error that indicates to the user of the module that the operation failed,
@@ -9,6 +10,8 @@ import { type ErrorOptions, TidalError } from './tidalError';
  * @extends TidalError
  */
 export class RetryableError extends TidalError {
+  override name = 'RetryableError';
+
   constructor(errorCode: string, options?: ErrorOptions) {
     super(errorCode, options);
 
@@ -16,10 +19,6 @@ export class RetryableError extends TidalError {
     Object.setPrototypeOf(this, RetryableError.prototype);
 
     // Maintains proper stack trace for where our error was thrown (only available on V8)
-    if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, RetryableError);
-    }
-
-    this.name = 'RetryableError';
+    captureStackTrace(this, RetryableError);
   }
 }

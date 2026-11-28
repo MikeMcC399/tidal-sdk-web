@@ -1,0 +1,73 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [2.6.0] - 2026-09-30
+
+### Added
+
+- `flush({ discardUnsent: true })` submits what it can and then drops whatever is still queued from memory and IndexedDB, resolving once the store is confirmed empty. Only for cases where the outgoing user's data must not remain on the device, i.e. signing out on a shared or untrusted device; on a personal device prefer a plain `flush()`. `flush()` now resolves with `{ discarded: number }` so callers can see how many events were lost; without the option this is always `0`.
+
+### Fixed
+
+- Worker replies are now matched to the request that is waiting for them, so an `init` and a `clear` in flight at the same time cannot consume each other's reply.
+
+## [2.5.0] - 2026-09-16
+
+### Added
+
+- `flush()` waits for any `sendEvent()` calls still being prepared and then submits all queued events using the current credentials. Call it before logging out or switching user so the active user's queued events are delivered while their credentials are still available, instead of waiting in the queue until the next login.
+
+### Fixed
+
+- `submitEvents` is now single-flight: a scheduler tick (or `flush()`) that arrives while a submit loop is still draining the queue awaits that loop instead of starting a second one, which could post the same batch twice.
+- A failure while reading the batch response body is now treated like a network failure (outage, events stay queued) instead of surfacing as a rejection.
+- A batch whose only outcome is a retryable `BatchResultErrorEntry` no longer triggers an immediate resubmit loop; the event is left for the next scheduled run.
+- `initDB` no longer leaks a worker `message` listener per call, and rejects instead of hanging forever if the worker fails to open the database.
+
+## [2.4.2] - 2026-05-22
+
+### Fixed
+
+- `submitEvents` now aborts the batch `POST` after a 10 s timeout and treats fetch errors as an outage (events stay queued for retry) so a network/SSL-inspection device that silently drops the telemetry request can no longer block the event loop and stall playback in the consuming app.
+
+## [2.4.1] - 2026-05-13
+
+### Fixed
+
+- Published `.d.ts` files now use explicit `.js` extensions on relative imports so the types resolve correctly under TypeScript's `"moduleResolution": "NodeNext"`/`"Node16"` ([#633](https://github.com/tidal-music/tidal-sdk-web/issues/633)).
+- Reordered the `package.json` `"exports"` so the `"types"` condition precedes `"import"`, ensuring TypeScript resolves types via the primary condition rather than a fallback (TS#50762).
+- Removed an accidental `@tidal-music/event-producer` self-dependency from the published `package.json`.
+
+## [2.4.0] - 2025-08-13
+
+### Changed
+
+- Removed unneeded Action header from monitoring and submit event functions
+
+## [2.3.2] - 2025-02-19
+
+### Fixed
+
+- Queue Worker is now inlined, hopefully making it more compatible with Vite dev mode
+
+## [2.3.1] - 2025-01-28
+
+### Fixed
+
+- Queue Worker is now built in a slightly different way, making it more compatible with Vite
+
+## [2.3.0] - 2024-07-02
+
+### Fixed
+
+- Event Producer now uses (Web)Worker instead of SharedWorker, which should make it Android compatible
+
+## [2.2.0] - 2024-04-19
+
+### Fixed
+
+- Event Producer timestamps are now integer values which fixes an ingestion error for CDF events and a warning for older style events.

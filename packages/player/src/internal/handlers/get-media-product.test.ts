@@ -1,9 +1,9 @@
 import { expect } from 'chai';
 
-import * as Player from '../../index';
-import { waitFor } from '../../test-helpers';
+import * as Player from '../../index.js';
+import { waitFor } from '../../test-helpers.js';
 
-import { getMediaProduct } from './get-media-product';
+import { getMediaProduct } from './get-media-product.js';
 
 describe('getMediaProduct', () => {
   beforeEach(async () => {
@@ -20,7 +20,6 @@ describe('getMediaProduct', () => {
     this.timeout(10000);
 
     const test = async () => {
-      console.debug('loading');
       await Player.load(
         {
           productId: '141120674',
@@ -30,18 +29,12 @@ describe('getMediaProduct', () => {
         },
         0,
       );
-      console.debug('load done');
 
-      console.debug('play');
       await Player.play();
-      console.debug('playing');
 
-      console.debug('waiting 2000');
-      await waitFor(2000);
+      await waitFor(500);
 
       const activeMediaProduct = getMediaProduct();
-
-      console.debug({ activeMediaProduct });
 
       expect(activeMediaProduct).to.equal({
         productId: '141120674',

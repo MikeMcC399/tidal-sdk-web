@@ -1,4 +1,5 @@
-import { type ErrorOptions, TidalError } from './tidalError';
+import { captureStackTrace } from './captureStackTrace.js';
+import { type ErrorOptions, TidalError } from './tidalError.js';
 
 /**
  * Raised whenever an error occurs as the result of bad network conditions.
@@ -6,6 +7,8 @@ import { type ErrorOptions, TidalError } from './tidalError';
  * @extends TidalError
  */
 export class NetworkError extends TidalError {
+  override name = 'NetworkError';
+
   constructor(errorCode: string, options?: ErrorOptions) {
     super(errorCode, options);
 
@@ -13,10 +16,6 @@ export class NetworkError extends TidalError {
     Object.setPrototypeOf(this, NetworkError.prototype);
 
     // Maintains proper stack trace for where our error was thrown (only available on V8)
-    if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, NetworkError);
-    }
-
-    this.name = 'NetworkError';
+    captureStackTrace(this, NetworkError);
   }
 }

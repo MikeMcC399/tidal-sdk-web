@@ -1,13 +1,13 @@
 import '@vitest/web-worker';
 import { trueTime } from '@tidal-music/true-time';
 
-import { config } from '../../test/fixtures/config';
-import { init } from '../config';
-import * as sqsParamsConverter from '../utils/sqsParamsConverter';
+import { config } from '../../test/fixtures/config.js';
+import { init } from '../config.js';
+import * as sqsParamsConverter from '../utils/sqsParamsConverter.js';
 
-import * as monitor from './';
+import * as monitor from './index.js';
 
-describe.sequential('monitor', () => {
+describe('monitor', { concurrent: false }, () => {
   beforeEach(() => {
     init(config);
     monitor.resetMonitoringState();
@@ -54,7 +54,6 @@ describe.sequential('monitor', () => {
       }),
     );
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment,@typescript-eslint/no-unsafe-call
     const messageBody = (
       vi.mocked(fetch).mock.calls[0]?.[1]?.body as URLSearchParams | undefined
     )?.get('SendMessageBatchRequestEntry.1.MessageBody');

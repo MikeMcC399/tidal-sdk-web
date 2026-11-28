@@ -1,31 +1,30 @@
-import { activeDeviceChanged as activeDeviceChangedEvent } from '../api/event/active-device-changed';
-import { activeDeviceDisconnected as activeDeviceDisconnectedEvent } from '../api/event/active-device-disconnected';
-import { activeDeviceModeChanged as activeDeviceModeChangedEvent } from '../api/event/active-device-mode-changed';
-import { activeDevicePassThroughChanged as activeDevicePassThroughChangedEvent } from '../api/event/active-device-pass-through-changed';
-import type { EndedEvent } from '../api/event/ended';
-import { mediaProductTransition as mediaProductTransitionEvent } from '../api/event/media-product-transition';
-import * as Config from '../config';
-import { events } from '../event-bus';
-import type { ErrorCodes } from '../internal';
-import { PlayerError } from '../internal';
-import * as StreamingMetrics from '../internal/event-tracking/streaming-metrics/index';
-import { composePlaybackContext } from '../internal/helpers/compose-playback-context';
-import { streamingSessionStore } from '../internal/helpers/streaming-session-store';
-import type { OutputDevices } from '../internal/output-devices';
-import { trueTime } from '../internal/true-time';
+import { activeDeviceChanged as activeDeviceChangedEvent } from '../api/event/active-device-changed.js';
+import { activeDeviceDisconnected as activeDeviceDisconnectedEvent } from '../api/event/active-device-disconnected.js';
+import { activeDeviceModeChanged as activeDeviceModeChangedEvent } from '../api/event/active-device-mode-changed.js';
+import type { EndedEvent } from '../api/event/ended.js';
+import { mediaProductTransition as mediaProductTransitionEvent } from '../api/event/media-product-transition.js';
+import * as Config from '../config.js';
+import { events } from '../event-bus.js';
+import * as StreamingMetrics from '../internal/event-tracking/streaming-metrics/index.js';
+import { composePlaybackContext } from '../internal/helpers/compose-playback-context.js';
+import { timestamps } from '../internal/helpers/streaming-metrics-timestamps.js';
+import { streamingSessionStore } from '../internal/helpers/streaming-session-store.js';
+import { PlayerError } from '../internal/index.js';
+import type { ErrorCodes } from '../internal/index.js';
+import type { OutputDevices } from '../internal/output-devices.js';
+import { trueTime } from '../internal/true-time.js';
 
 // eslint-disable-next-line import/order
-import type { LoadPayload } from './basePlayer';
+import type { LoadPayload } from './basePlayer.js';
 
-// eslint-disable-next-line import/no-cycle
-import { BasePlayer } from './basePlayer';
+import { BasePlayer } from './basePlayer.js';
 import type {
   NativePlayerComponent,
   NativePlayerComponentDeviceDescription,
   NativePlayerComponentInterface,
   NativePlayerComponentSupportedEvents,
-} from './nativeInterface';
-import { playerState } from './state';
+} from './nativeInterface.js';
+import { playerState } from './state.js';
 
 type MediaErrorCode =
   | 'file_checksum_mismatch'
@@ -78,8 +77,6 @@ export default class NativePlayer extends BasePlayer {
    */
   #duration!: number;
 
-  #isReset = true;
-
   #player!: NativePlayerComponentInterface;
 
   #preloadedLoadPayload: LoadPayload | undefined;
@@ -94,7 +91,7 @@ export default class NativePlayer extends BasePlayer {
     if (Config.get('outputDevicesEnabled')) {
       // eslint-disable-next-line @typescript-eslint/no-floating-promises
       (async () => {
-        const impMod = await import('../internal/output-devices');
+        const impMod = await import('../internal/output-devices.js');
 
         outputDevices = impMod.outputDevices;
 
@@ -112,7 +109,6 @@ export default class NativePlayer extends BasePlayer {
     this.#player.setVolume(100);
   }
 
-  // eslint-disable-next-line class-methods-use-this
   #handleDeviceError(errorName: DeviceErrorNames) {
     events.dispatchError(
       new PlayerError('EUnexpected', deviceErrorCodeMap[errorName]),
@@ -140,22 +136,29 @@ export default class NativePlayer extends BasePlayer {
     this.debugLog('handleNativePlayerStateChange', state);
 
     switch (state) {
+      case 'active':
+        // 'active' means the native pipeline is actually producing output,
+        // so this is the strict "playback actually started" signal. Only
+        // the first call per session is reported. Sample the timestamp
+        // before the playbackState setter, which synchronously notifies
+        // consumer listeners whose work should not be included in the
+        // startup time.
+        this.mediaProductActuallyStarted(this.currentStreamingSessionId);
+        this.playbackState = 'PLAYING';
+        break;
+      case 'idle':
+      case 'seeking':
+        this.playbackState = 'STALLED';
+        break;
       case 'paused':
       case 'ready':
         this.playbackState = 'NOT_PLAYING';
         break;
-      case 'active':
-        this.playbackState = 'PLAYING';
-        break;
-      case 'seeking':
-      case 'idle':
-        this.playbackState = 'STALLED';
+      case 'stopped': // Happens when stopping to buffer more data?
+        this.playbackState = 'NOT_PLAYING';
         break;
       case 'uninitialized':
         this.playbackState = 'IDLE';
-        break;
-      case 'stopped': // Happens when stopping to buffer more data?
-        this.playbackState = 'NOT_PLAYING';
         break;
       default:
         this.debugLog('No handling for state', state);
@@ -166,8 +169,9 @@ export default class NativePlayer extends BasePlayer {
   async #handleNetworkError() {
     this.debugLog('handleNetworkError');
 
-    const actualStartTimestamp = trueTime.timestamp(
+    const actualStartTimestamp = timestamps.get(
       'streaming_metrics:playback_statistics:actualStartTimestamp',
+      this.currentStreamingSessionId,
     );
     const timeSinceStart =
       actualStartTimestamp !== undefined
@@ -211,7 +215,7 @@ export default class NativePlayer extends BasePlayer {
    * Clean up native player before leaving for another player.
    */
   abandon() {
-    if (outputDevices && outputDevices.deviceMode === 'exclusive') {
+    if (outputDevices?.deviceMode === 'exclusive') {
       /*
         Remove lock on audio device so shaka can use it. Otherwise throws error later when shaka is
         active player and a preload is done in native player (which triggers a device lock).
@@ -232,13 +236,26 @@ export default class NativePlayer extends BasePlayer {
    * can gather the duration data and send a media product transition.
    */
   async handleAutomaticTransitionToPreloadedMediaProduct() {
-    await this.nativeEvent('mediaduration');
+    // Capture which preloaded item the native pipeline committed to at the
+    // track boundary; a concurrent setNext() can replace
+    // this.preloadedStreamingSessionId while we await the duration and
+    // active signals below, which would attribute the audible stream to the
+    // wrong media product.
+    const committedStreamingSessionId = this.preloadedStreamingSessionId;
+
+    // Read the duration off the awaited event; the #duration field is
+    // updated by a separate listener that is not guaranteed to have run
+    // before this waiter settles.
+    const mediaDurationEvent = (await this.nativeEvent(
+      'mediaduration',
+    )) as Event & { target: number };
+    this.#duration = Number(mediaDurationEvent.target);
 
     this.#preloadedLoadPayload = undefined;
 
     const mediaProductTransition =
       streamingSessionStore.getMediaProductTransition(
-        this.preloadedStreamingSessionId,
+        committedStreamingSessionId,
       );
 
     if (!mediaProductTransition) {
@@ -257,9 +274,9 @@ export default class NativePlayer extends BasePlayer {
       actualDuration: this.#duration,
     };
 
-    if (this.preloadedStreamingSessionId) {
+    if (committedStreamingSessionId) {
       streamingSessionStore.saveMediaProductTransition(
-        this.preloadedStreamingSessionId,
+        committedStreamingSessionId,
         {
           mediaProduct,
           playbackContext: updatedPlaybackContext,
@@ -269,11 +286,18 @@ export default class NativePlayer extends BasePlayer {
 
     await this.mediaStateChange('active');
 
+    // The 'active' state-change handler attributed the signal to the
+    // outgoing session (currentStreamingSessionId has not switched yet), so
+    // report the actual start for the committed session here -- right after
+    // the awaited signal and before dispatching the transition event, whose
+    // listeners can run arbitrarily long.
+    this.mediaProductActuallyStarted(committedStreamingSessionId);
+
     events.dispatchEvent(
       mediaProductTransitionEvent(mediaProduct, updatedPlaybackContext),
     );
 
-    this.currentStreamingSessionId = this.preloadedStreamingSessionId;
+    this.currentStreamingSessionId = committedStreamingSessionId;
 
     this.mediaProductStarted(this.currentStreamingSessionId);
   }
@@ -284,9 +308,7 @@ export default class NativePlayer extends BasePlayer {
     this.currentTime = payload.assetPosition;
     this.startAssetPosition = payload.assetPosition;
 
-    // Ensure reset and set reset to false since we're loading anew.
     await this.reset();
-    this.#isReset = false;
 
     const { assetPosition, mediaProduct, playbackInfo, streamInfo } = payload;
     const { securityToken, streamFormat, streamUrl } = streamInfo;
@@ -305,7 +327,13 @@ export default class NativePlayer extends BasePlayer {
       throw new Error('Stream format is undefined.');
     }
 
-    await mediaDurationEventPromise;
+    // Read the duration off the awaited event; the #duration field is
+    // updated by a separate listener that is not guaranteed to have run
+    // before this waiter settles.
+    const mediaDurationEvent = (await mediaDurationEventPromise) as Event & {
+      target: number;
+    };
+    this.#duration = Number(mediaDurationEvent.target);
 
     // Player was reset during load, do not continue.
     if (this.currentStreamingSessionId !== streamInfo.streamingSessionId) {
@@ -315,11 +343,18 @@ export default class NativePlayer extends BasePlayer {
     this.debugLog('load() duration is', this.#duration);
 
     if (assetPosition !== 0 && assetPosition < this.#duration) {
-      // Native player cannot seek until active
       (async () => {
+        // Native player cannot seek until active.
+        // Wait for player to become active via user interaction.
         await this.mediaStateChange('active');
-        await this.seek(assetPosition);
-        this.currentTime = assetPosition;
+        // Once the player becomes active, we need to make sure that
+        // the streaming session has not changed, else we will seek the
+        // wrong track!
+        // See: https://github.com/tidal-music/tidal-sdk-web/pull/452
+        if (this.currentStreamingSessionId === streamInfo.streamingSessionId) {
+          await this.seek(assetPosition);
+          this.currentTime = assetPosition;
+        }
       })().catch(console.error);
     } else {
       this.currentTime = 0;
@@ -349,26 +384,28 @@ export default class NativePlayer extends BasePlayer {
 
   mediaStateChange(state: string): Promise<string> {
     return new Promise<string>(resolve => {
-      this.#player.addEventListener(
-        'mediastate',
-        (event: Event & { target: string }) => {
-          if (event.target === state) {
-            resolve(event.target);
-          }
-        },
-      );
+      const handler = (event: Event & { target: string }) => {
+        if (event.target === state) {
+          this.#player.removeEventListener('mediastate', handler);
+          resolve(event.target);
+        }
+      };
+
+      this.#player.addEventListener('mediastate', handler);
     });
   }
 
   nativeEvent(eventName: NativePlayerComponentSupportedEvents): Promise<Event> {
     return new Promise(resolve => {
-      this.#player.addEventListener(eventName, (event: Event) =>
-        resolve(event),
-      );
+      const handler = (event: Event) => {
+        this.#player.removeEventListener(eventName, handler);
+        resolve(event);
+      };
+
+      this.#player.addEventListener(eventName, handler);
     });
   }
 
-  // eslint-disable-next-line @typescript-eslint/require-await
   async next(payload: LoadPayload) {
     this.debugLog('next', payload);
 
@@ -387,6 +424,10 @@ export default class NativePlayer extends BasePlayer {
 
     if (streamFormat) {
       this.#player.preload(streamUrl, streamFormat, securityToken);
+
+      if (!this.isActivePlayer) {
+        this.#player.pause();
+      }
     } else {
       console.error('Stream format undefined for preload.');
     }
@@ -456,6 +497,10 @@ export default class NativePlayer extends BasePlayer {
     }
   }
 
+  get ready() {
+    return Promise.resolve();
+  }
+
   registerEventListeners() {
     this.debugLog('registerEventListeners');
 
@@ -467,7 +512,31 @@ export default class NativePlayer extends BasePlayer {
       'mediastate',
       (e: Event & { target: string }) => {
         if (e.target === 'completed') {
-          this.finishCurrentMediaProduct('completed');
+          // A preloaded next item means the native pipeline transitions
+          // gaplessly on its own. Finalize seamlessly so no 'ended' event
+          // reaches the app mid-transition, and drive the transition
+          // directly since the suppressed 'ended' event no longer invokes
+          // playbackEngineEndedHandler.
+          const isSeamlessTransition = Boolean(this.hasNextItem());
+
+          if (isSeamlessTransition) {
+            timestamps.mark(
+              'streaming_metrics:playback_statistics:idealStartTimestamp',
+              playerState.preloadedStreamingSessionId,
+            );
+          }
+
+          this.finishCurrentMediaProduct('completed', isSeamlessTransition);
+
+          if (isSeamlessTransition) {
+            this.updateVolumeLevelForNextProduct();
+
+            if (this.isActivePlayer) {
+              this.handleAutomaticTransitionToPreloadedMediaProduct().catch(
+                console.error,
+              );
+            }
+          }
         } else {
           this.#handleNativePlayerStateChange(e.target);
         }
@@ -527,11 +596,10 @@ export default class NativePlayer extends BasePlayer {
     // this.#player.listDevices();
   }
 
-  // eslint-disable-next-line @typescript-eslint/require-await
   async reset(
     { keepPreload }: { keepPreload: boolean } = { keepPreload: false },
   ) {
-    if (this.#isReset) {
+    if (this.currentStreamingSessionId === undefined) {
       return;
     }
 
@@ -556,9 +624,9 @@ export default class NativePlayer extends BasePlayer {
     }
 
     this.playbackState = 'IDLE';
-    this.#isReset = true;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-misused-promises
   async seek(seconds: number) {
     // Native player cannot seek until active state has happened.
     if (!this.hasStarted()) {
@@ -675,71 +743,12 @@ export default class NativePlayer extends BasePlayer {
         this.#currentOutputId = sinkId;
       }
     } else {
-      // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
-      console.warn(`Device with sinkId ${sinkId} not found.`);
+      throw new Error(`Device with sinkId ${sinkId} not found.`);
     }
 
     return Promise.resolve();
   }
 
-  /**
-   * WIMPWC-7901
-   * This is a temporary fix as there is currently no way to enable
-   * the MQA decoder in Native Player after disabling it.
-   *
-   * Switching devices forces the Native Player to use the new device settings.
-   * By default `device.passThrough` is `undefined`, that's why we check explicitly for `false`.
-   *
-   * TODO: Refactor when `this._player.enableMQADecoder();` works....
-   */
-  updatePassThrough() {
-    if (!outputDevices) {
-      return;
-    }
-
-    const { activeDevice } = outputDevices;
-
-    if (outputDevices.passThrough === true) {
-      this.#player.disableMQADecoder();
-      events.dispatchEvent(activeDevicePassThroughChangedEvent(true));
-
-      return;
-    }
-
-    // Has been disabled before
-    if (outputDevices.passThrough === false) {
-      this.#player.selectSystemDevice();
-
-      if (activeDevice.nativeDeviceId) {
-        const deviceDescription = outputDevices.getNativeDevice(
-          activeDevice.nativeDeviceId,
-        );
-
-        if (deviceDescription) {
-          this.#player.selectDevice(
-            deviceDescription,
-            outputDevices.deviceMode,
-          );
-        }
-      } else {
-        console.error(
-          'Passthrough could not be properly disabled since the nativeDeviceId is missing for',
-          activeDevice,
-        );
-      }
-    }
-
-    this.#player.enableMQADecoder();
-
-    events.dispatchEvent(activeDevicePassThroughChangedEvent(false));
-  }
-
-  // eslint-disable-next-line class-methods-use-this
-  get ready() {
-    return Promise.resolve();
-  }
-
-  // eslint-disable-next-line class-methods-use-this
   get volume() {
     return Config.get('desiredVolumeLevel');
   }

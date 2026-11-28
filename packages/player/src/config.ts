@@ -1,25 +1,30 @@
-import type { LoudnessNormalizationMode } from './api/interfaces';
-import type { AudioQuality } from './internal/types';
+import type { LoudnessNormalizationMode } from './api/interfaces.js';
+import type { AudioQuality } from './internal/types.js';
 
 type Config = {
   apiUrl: string;
-  appVersion: string;
-  clientPlatform: string;
+  audioAdaptiveBitrateStreaming: boolean;
+  /**
+   * Controls track transition behavior:
+   *  - Zero: gapless (default)
+   *  - Positive: crossfade overlap in ms (max 15000)
+   */
+  crossfadeInMs: number;
   desiredVolumeLevel: number;
-  eventUrl: string;
   gatherEvents: boolean;
+  legacyApiUrl: string;
   loudnessNormalizationMode: LoudnessNormalizationMode;
   outputDevicesEnabled: boolean;
   streamingWifiAudioQuality: AudioQuality;
 };
 
 let state = Object.freeze({
-  apiUrl: 'https://api.tidal.com/v1',
-  appVersion: 'TIDAL Player',
-  clientPlatform: 'web',
+  apiUrl: 'https://openapi.tidal.com/v2/',
+  audioAdaptiveBitrateStreaming: true,
+  crossfadeInMs: 0,
   desiredVolumeLevel: 1,
-  eventUrl: 'https://et.tidal.com/api/events',
   gatherEvents: true,
+  legacyApiUrl: 'https://api.tidal.com/v1',
   loudnessNormalizationMode: 'ALBUM',
   outputDevicesEnabled: false,
   streamingWifiAudioQuality: 'LOW',

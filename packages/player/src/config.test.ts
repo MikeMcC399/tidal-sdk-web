@@ -1,13 +1,13 @@
 import { expect } from 'chai';
 
-import * as Config from './config';
+import * as Config from './config.js';
 
 describe('Config', () => {
   it('can set/get value', async () => {
     Config.update({
-      eventUrl: 'tidal-hifi',
+      desiredVolumeLevel: 0.1,
     });
 
-    expect(Config.get('eventUrl')).to.equal('tidal-hifi');
+    expect(Config.get('desiredVolumeLevel')).to.equal(0.1);
   });
 });

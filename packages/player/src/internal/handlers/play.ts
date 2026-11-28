@@ -1,6 +1,6 @@
-import { events } from '../../event-bus';
-import { playerState } from '../../player/state';
-import { trueTime } from '../true-time';
+import { events } from '../../event-bus.js';
+import { playerState } from '../../player/state.js';
+import { trueTime } from '../true-time.js';
 
 /**
  * Start playback of active media product.
@@ -11,7 +11,7 @@ import { trueTime } from '../true-time';
  * the load method, this method will do nothing.
  *
  * @returns {Promise<void>}
- * @see {@link import('../../api/event/playback-state-change').PlaybackStateChange}
+ * @see {@link PlaybackStateChange}
  */
 export async function play() {
   await trueTime.synchronize();

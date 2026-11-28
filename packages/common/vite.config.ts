@@ -9,10 +9,11 @@ export default defineConfig({
       formats: ['es'],
     },
   },
-  plugins: [dts({ rollupTypes: true, tsconfigPath: 'tsconfig.build.json' })],
+  plugins: [dts({ bundleTypes: false, tsconfigPath: 'tsconfig.build.json' })],
   test: {
     coverage: {
       exclude: ['./src/index.ts'].concat(configDefaults.coverage.exclude ?? []), // ignore barrel file
+      provider: 'v8',
       reportOnFailure: true,
       reporter: process.env.CI ? ['json', 'json-summary'] : ['html'],
       thresholds: {

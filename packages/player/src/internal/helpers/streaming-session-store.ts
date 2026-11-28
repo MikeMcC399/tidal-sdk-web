@@ -1,12 +1,18 @@
-import type { MediaProductTransitionPayload } from '../../api/event/media-product-transition';
+import type { MediaProductTransitionPayload } from '../../api/event/media-product-transition.js';
 
-import type { StreamInfo } from './manifest-parser';
-import type { PlaybackInfo } from './playback-info-resolver';
+import type { StreamInfo } from './manifest-parser.js';
+import type { PlaybackInfo } from './playback-info-resolver.js';
 
 class StreamingSessionStore {
   #mediaProductTransitions = new Map<string, MediaProductTransitionPayload>();
 
   #playbackInfos = new Map<string, PlaybackInfo>();
+
+  // Sessions that have had their actual playback start reported, see
+  // BasePlayer.mediaProductActuallyStarted.
+  #reportedActualStarts = new Set<string>();
+
+  #startedStreamInfos = new Map<string, boolean>();
 
   #streamInfos = new Map<string, StreamInfo>();
 
@@ -57,7 +63,13 @@ class StreamingSessionStore {
   deleteSession(streamingSessionId: string) {
     this.deleteMediaProductTransition(streamingSessionId);
     this.#playbackInfos.delete(streamingSessionId);
+    this.#reportedActualStarts.delete(streamingSessionId);
+    this.#startedStreamInfos.delete(streamingSessionId);
     this.deleteStreamInfo(streamingSessionId);
+  }
+
+  deleteStartedStreamInfo(streamingSessionId: string) {
+    this.#startedStreamInfos.delete(streamingSessionId);
   }
 
   deleteStreamInfo(streamingSessionId: string) {
@@ -96,6 +108,14 @@ class StreamingSessionStore {
     return this.#playbackInfos.has(streamingSessionId);
   }
 
+  hasReportedActualStart(streamingSessionId: string) {
+    return this.#reportedActualStarts.has(streamingSessionId);
+  }
+
+  hasStartedStreamInfo(streamingSessionId: string) {
+    return this.#startedStreamInfos.has(streamingSessionId);
+  }
+
   hasStreamInfo(streamingSessionId: string) {
     return this.#streamInfos.has(streamingSessionId);
   }
@@ -132,6 +152,14 @@ class StreamingSessionStore {
 
   saveStreamInfo(streamingSessionId: string, streamInfo: StreamInfo) {
     this.#streamInfos.set(streamingSessionId, streamInfo);
+  }
+
+  setReportedActualStart(streamingSessionId: string) {
+    this.#reportedActualStarts.add(streamingSessionId);
+  }
+
+  setStartedStreamInfo(streamingSessionId: string) {
+    return this.#startedStreamInfos.set(streamingSessionId, true);
   }
 }
 

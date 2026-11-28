@@ -1,13 +1,12 @@
-import { createReducer } from '../../helpers/reducer';
-import type { OutputType } from '../../output-devices';
-import type { AudioQuality, VideoQuality } from '../../types';
+import { createReducer } from '../../helpers/reducer.js';
+import type { OutputType } from '../../output-devices.js';
+import type { AudioQuality, VideoQuality } from '../../types.js';
 
 export type StatisticsOutputType =
   | 'BLUETOOTH'
   | 'BUILT_IN'
   | 'DISPLAY_PORT'
   | 'HDMI'
-  | 'MQA'
   | 'SYSTEM_DEFAULT'
   | 'USB';
 
@@ -21,28 +20,36 @@ export type Stall = Readonly<{
 export type Adaptation = Readonly<{
   assetPosition: number;
   bandwidth: number;
-  codecs: null | string | undefined;
-  mimeType: null | string | undefined;
+  codecs: string | null | undefined;
+  mimeType: string | null | undefined;
   timestamp: number;
-  videoHeight: null | number | undefined;
-  videoWidth: null | number | undefined;
+  videoHeight: number | null | undefined;
+  videoWidth: number | null | undefined;
 }>;
 
 export type BasePayload = {
   actualAssetPresentation: 'FULL' | 'PREVIEW';
   actualAudioMode: 'DOLBY_ATMOS' | 'SONY_360RA' | 'STEREO';
-  actualProductId: null | string;
-  actualStartTimestamp: number;
+  actualProductId: string | null;
+  /**
+   * Null when playback never actually started (e.g. the session ended in an
+   * error before the first frame/sample was played). Consumers use this to
+   * exclude never-started sessions from startup time metrics.
+   */
+  actualStartTimestamp: number | null;
   actualStreamType: 'LIVE' | 'ON_DEMAND';
   adaptations: Array<Adaptation>;
-  cdm: 'FAIR_PLAY' | 'NONE' | 'PLAY_READY' | 'WIDEVINE';
-  cdmVersion: null | string;
+  cdm: 'FAIR_PLAY' | 'NONE' | 'WIDEVINE';
+  cdmVersion: string | null;
   endReason: 'COMPLETE' | 'ERROR' | 'OTHER';
   endTimestamp: number;
-  errorCode: null | string;
-  errorMessage: null | string;
+  errorCode: string | null;
+  errorMessage: string | null;
   hasAds: boolean;
-  idealStartTimestamp: number;
+  /**
+   * Null when playback never actually started, see actualStartTimestamp.
+   */
+  idealStartTimestamp: number | null;
   outputDevice: StatisticsOutputType | null;
   productType: 'TRACK' | 'VIDEO';
   stalls: Array<Stall>;
@@ -72,21 +79,19 @@ export function transformOutputType(
   switch (outputType) {
     case 'bluetooth':
       return 'BLUETOOTH';
-    case 'displayPort':
-      return 'DISPLAY_PORT';
-    case 'mqa':
-      return 'MQA';
     case 'builtIn':
       return 'BUILT_IN';
+    case 'displayPort':
+      return 'DISPLAY_PORT';
     case 'hdmi':
       return 'HDMI';
-    case 'usb':
-      return 'USB';
     case 'systemDefault':
       return 'SYSTEM_DEFAULT';
+    case 'usb':
+      return 'USB';
     // Never happens (cannot be chose by user)
-    case 'windowsCommunication':
     case 'airplay':
+    case 'windowsCommunication':
     default:
       return undefined;
   }
@@ -97,7 +102,7 @@ const defaultPayload: Payload = {
   actualAudioMode: 'STEREO',
   actualProductId: null,
   actualQuality: 'LOSSLESS',
-  actualStartTimestamp: 0,
+  actualStartTimestamp: null,
   actualStreamType: 'ON_DEMAND',
   adaptations: [],
   cdm: 'WIDEVINE',
@@ -107,7 +112,7 @@ const defaultPayload: Payload = {
   errorCode: null,
   errorMessage: null,
   hasAds: false,
-  idealStartTimestamp: 0,
+  idealStartTimestamp: null,
   outputDevice: null,
   productType: 'TRACK',
   stalls: [],

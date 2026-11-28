@@ -2,7 +2,6 @@
   "extends": "../../tsconfig.json",
   "compilerOptions": {
     "noEmit": false,
-    "baseUrl": "./src",
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "target": "es2022",
@@ -10,7 +9,8 @@
     "skipLibCheck": true,
     "allowSyntheticDefaultImports": true,
     "types": [
-      "mocha"
+      "mocha",
+      "vite/client"
     ],
     "sourceMap": false
   },

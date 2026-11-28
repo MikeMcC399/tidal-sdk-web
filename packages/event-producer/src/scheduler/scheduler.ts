@@ -1,12 +1,12 @@
-import { type Config, getConfig } from '../config';
-import { sendMonitoringInfo } from '../monitor';
-import { submitEvents } from '../submit/submit';
+import { type Config, getConfig } from '../config.js';
+import { sendMonitoringInfo } from '../monitor/index.js';
+import { submitEvents } from '../submit/submit.js';
 
 const ThirtySeconds = 30 * 1000;
 const SixtySeconds = 60 * 1000;
 
-let eventBatchIntervalRef: NodeJS.Timeout;
-let monitoringIntervalRef: NodeJS.Timeout;
+let eventBatchIntervalRef: ReturnType<typeof setInterval>;
+let monitoringIntervalRef: ReturnType<typeof setInterval>;
 
 /**
  * Initializes the scheduler.

@@ -5,9 +5,20 @@
     "editor.codeActionsOnSave": {
       "source.fixAll.eslint": "explicit"
     },
-    "eslint.experimental.useFlatConfig": true,
+    "eslint.useFlatConfig": true,
     "cSpell.words": [
       "Retryable",
       "typecheck"
+    ],
+    "vitest.enable": true,
+    "vitest.maximumConfigs": 20,
+    "vitest.exclude": [
+      "**/dist/**",
+      "**/node_modules/**",
+      "**/cypress/**",
+      "**/docs/**",
+      "**/.git/**",
+      "**/.vscode/**",
+      "**/packages/player/**"
     ]
 }
